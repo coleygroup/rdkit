@@ -90,6 +90,7 @@ add_subdirectory(EnumerateStereoisomers)
 
 add_subdirectory(CIPLabeler)
 add_subdirectory(Deprotect)
+add_subdirectory(AtomTyper)
 
 if (RDK_BUILD_STRUCTCHECKER_SUPPORT)
     add_subdirectory(StructChecker)
