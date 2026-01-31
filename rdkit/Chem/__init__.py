@@ -29,6 +29,12 @@ try:
 except ImportError:
   pass
 
+try:
+  # This is an optional component of the build
+  from rdkit.Chem.rdAtomTyper import *
+except ImportError:
+  pass
+
 # Coordgen needs to know where its template file is.
 # The default install puts it in RDDataDir
 try:
