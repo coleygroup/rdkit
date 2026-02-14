@@ -1,4 +1,5 @@
 #include "smarts_analyzer.hpp" //header file for smarts_analyzer.cpp
+#include "atom_typer.hpp"
 #include <GraphMol/GraphMol.h> // Core RDKit molecule functionality
 #include <GraphMol/MolOps.h> // For molecule operations from RDKit molecule
 #include <GraphMol/SmilesParse/SmilesParse.h> // For parsing SMILES strings
@@ -24,7 +25,7 @@ public:
 
     // Returns number of logical alternatives encoded by this query (for single operator)
     // So, OR(x, y, z) returns 3, AND(x, y) returns 1, NOT(x) returns 1
-    int count_query_dof(const Queries::Query<int, const RDKit::Atom*, true>* query) {
+    int count_query_dof_logical(const Queries::Query<int, const RDKit::Atom*, true>* query) {
         
         // no query to consider, only one logical option
         if (!query) return 1;
@@ -41,7 +42,7 @@ public:
             for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
 
                 // calls count_query_dof recursively on each child, accumulating total
-                sum += count_query_dof(it->get());
+                sum += count_query_dof_logical(it->get());
             }
 
             return sum;
@@ -59,7 +60,7 @@ public:
             // Recursively count DOF in children and multiply
             // Example: C&(H1,H2) means Carbon AND (1H OR 2H) = 2 alternatives
             for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-                product *= count_query_dof(it->get());
+                product *= count_query_dof_logical(it->get());
             }
             
             return product;
@@ -73,6 +74,30 @@ public:
 
         // If it's not a logical operator, it's a leaf node, one option
         return 1;
+    }
+
+    int count_query_dof(
+        const Queries::Query<int, const RDKit::Atom*, true>* query,
+        const std::vector<PatternItem>& pattern_types,
+        unsigned int atom_idx) {
+        const int logical_dof = count_query_dof_logical(query);
+        for (const auto& item : pattern_types) {
+            if (item.kind != PatternItemKind::Atom) {
+                continue;
+            }
+            if (static_cast<unsigned int>(item.atom.atom_idx) != atom_idx) {
+                continue;
+            }
+
+            if (item.atom.atomic_number <= 0) {
+                return logical_dof;
+            }
+
+            const int valence_dof = std::max(1, item.atom.remaining_valence + 1);
+            return std::min(logical_dof, valence_dof);
+        }
+
+        return logical_dof;
     }
 
     //class of atom constraints
@@ -739,6 +764,9 @@ int SmartsAnalyzer::calculate_dof(const std::string& smarts) {
             throw std::runtime_error("Failed to parse SMARTS: " + smarts);
         }
 
+        AtomTyper typer;
+        const auto pattern_types = typer.type_pattern_from_smarts(smarts);
+
         //DOF calculation logic goes here
         int dof = 1; // combinatorial logic, starts at 1
         const int MAX_DOF = 1000000; // Prevent overflow
@@ -749,7 +777,8 @@ int SmartsAnalyzer::calculate_dof(const std::string& smarts) {
             const auto* qatom = dynamic_cast<const RDKit::QueryAtom*>(atom);
             if (!qatom) continue;
 
-            int atom_dof = pimpl->count_query_dof(qatom->getQuery());
+            int atom_dof = pimpl->count_query_dof(qatom->getQuery(), pattern_types,
+                                                  atom->getIdx());
 
             // Check for overflow before multiplying
             if (dof > 0 && atom_dof > MAX_DOF / dof) {

@@ -16,7 +16,7 @@ PYBIND11_MODULE(atom_typer, m) {
         .def_readwrite("atomic_number", &atom_typer::AtomType::atomic_number)
         .def_readwrite("formal_charge", &atom_typer::AtomType::formal_charge)
         .def_readwrite("num_hydrogens", &atom_typer::AtomType::num_hydrogens)
-        .def_readwrite("degree", &atom_typer::AtomType::degree)
+     .def_readwrite("min_bonds", &atom_typer::AtomType::min_bonds)
         .def_readwrite("valence", &atom_typer::AtomType::valence)
         .def_readwrite("is_aromatic", &atom_typer::AtomType::is_aromatic)
         .def_readwrite("is_in_ring", &atom_typer::AtomType::is_in_ring)
@@ -39,6 +39,9 @@ PYBIND11_MODULE(atom_typer, m) {
         .def("type_atoms_from_smarts", &atom_typer::AtomTyper::type_atoms_from_smarts,
              py::arg("smarts"),
              "Type all atoms in a SMARTS string")
+        .def("enumerate_dof_smarts", &atom_typer::AtomTyper::enumerate_dof_smarts,
+             py::arg("smarts"),
+             "Enumerate per-atom H/charge/D/X alternatives with valence filtering")
         .def("get_atom_types_string", &atom_typer::AtomTyper::get_atom_types_string,
              py::arg("atom_types"),
              "Get atom types as a formatted string")

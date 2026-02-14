@@ -1,4 +1,4 @@
-#include "atom_typer.hpp"
+#include <GraphMol/AtomTyper/atom_typer.hpp>
 #include <catch2/catch_all.hpp>
 #include <stdexcept>
 
@@ -15,15 +15,15 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Basic SMILES (ethanol)", "[AtomTy
     
     // Check first carbon
     CHECK(atom_types[0].atomic_number == 6);
-    CHECK(atom_types[0].degree == 1);
+    CHECK(atom_types[0].min_bonds == 1);
     
     // Check second carbon
     CHECK(atom_types[1].atomic_number == 6);
-    CHECK(atom_types[1].degree == 2);
+    CHECK(atom_types[1].min_bonds == 2);
     
     // Check oxygen
     CHECK(atom_types[2].atomic_number == 8);
-    CHECK(atom_types[2].degree == 1);
+    CHECK(atom_types[2].min_bonds == 1);
 }
 
 // Test aromatic molecules
@@ -97,6 +97,76 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Basic SMARTS", "[AtomTyper]") {
     
     // SMARTS patterns may have variable results, just check it doesn't crash
     CHECK_NOTHROW(typer.type_atoms_from_smarts(smarts));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS explicit H defaults to 0", "[AtomTyper]") {
+    std::string smarts = "[C]";
+    auto atom_types = typer.type_atoms_from_smarts(smarts);
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].num_hydrogens == 0);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS #6 supports aromatic and aliphatic", "[AtomTyper]") {
+    std::string smarts = "[#6]";
+    auto atom_types = typer.type_atoms_from_smarts(smarts);
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].is_aromatic);
+    CHECK(atom_types[0].is_aliphatic);
+    CHECK(atom_types[0].smarts_pattern.find("A,a") != std::string::npos);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS explicit H count preserved", "[AtomTyper]") {
+    std::string smarts = "[CH3]";
+    auto atom_types = typer.type_atoms_from_smarts(smarts);
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].num_hydrogens == 3);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: enumerate_dof_smarts emits expected flags",
+                 "[AtomTyper]") {
+    const std::string smarts = "[CH2][CX3]=[O]";
+    const std::string enumerated = typer.enumerate_dof_smarts(smarts);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find("D") != std::string::npos);
+    CHECK(enumerated.find("H") != std::string::npos);
+    const bool has_charge_token =
+        enumerated.find("+") != std::string::npos ||
+        enumerated.find("-") != std::string::npos;
+    CHECK(has_charge_token);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS bond counts and hybridization", "[AtomTyper]") {
+    std::string smarts = "[C]=[C]";
+    auto atom_types = typer.type_atoms_from_smarts(smarts);
+
+    REQUIRE(atom_types.size() == 2);
+    for (const auto& at : atom_types) {
+        CHECK(at.num_single_bonds == 0);
+        CHECK(at.num_double_bonds == 1);
+        CHECK(at.num_triple_bonds == 0);
+        CHECK(at.num_aromatic_bonds == 0);
+        CHECK(at.hybridization == "SP2");
+    }
+
+    const auto pattern_items = typer.type_pattern_from_smarts(smarts);
+    const auto typed_pattern = typer.get_pattern_types_string(pattern_items);
+    CHECK(typed_pattern.find("SingleBonds=0") != std::string::npos);
+    CHECK(typed_pattern.find("DoubleBonds=1") != std::string::npos);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: remaining valence uses RDKit valence API", "[AtomTyper]") {
+    std::string smiles = "CCO";
+    auto atom_types = typer.type_atoms_from_smiles(smiles);
+
+    REQUIRE(atom_types.size() == 3);
+    CHECK(atom_types[0].remaining_valence == 3);
+    CHECK(atom_types[1].remaining_valence == 2);
+    CHECK(atom_types[2].remaining_valence == 1);
 }
 
 // Test invalid SMILES

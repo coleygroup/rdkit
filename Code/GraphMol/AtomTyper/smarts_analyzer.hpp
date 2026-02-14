@@ -1,7 +1,11 @@
 #ifndef SMARTS_ANALYZER_HPP
 #define SMARTS_ANALYZER_HPP
 
+#if __has_include(<RDGeneral/export.h>)
 #include <RDGeneral/export.h>
+#else
+#include <../../RDGeneral/export.h>
+#endif
 #include <string>
 #include <vector>
 #include <map>
