@@ -11,6 +11,34 @@ struct SmartsAnalyzerFixture {
 
 // calculate_dof Tests
 
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+             "SmartsAnalyzer: add_atom_maps simple",
+             "[SmartsAnalyzer][add_atom_maps]") {
+    const auto mapped = analyzer.add_atom_maps("[C][O]");
+    CHECK_FALSE(mapped.empty());
+    CHECK(mapped.find(":1") != std::string::npos);
+    CHECK(mapped.find(":2") != std::string::npos);
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+             "SmartsAnalyzer: add_atom_maps includes recursive atoms",
+             "[SmartsAnalyzer][add_atom_maps]") {
+    const auto mapped = analyzer.add_atom_maps("[#6&$([#7]-[#8])]");
+    CHECK_FALSE(mapped.empty());
+    CHECK(mapped.find("$(") != std::string::npos);
+    CHECK((mapped.find("#7:") != std::string::npos ||
+        mapped.find("N:") != std::string::npos));
+    CHECK((mapped.find("#8:") != std::string::npos ||
+        mapped.find("O:") != std::string::npos));
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+             "SmartsAnalyzer: add_atom_maps invalid input",
+             "[SmartsAnalyzer][add_atom_maps]") {
+    CHECK_THROWS(analyzer.add_atom_maps(""));
+    CHECK_THROWS(analyzer.add_atom_maps("[C"));
+}
+
 // Test basic SMARTS with no OR queries (DOF = 1)
 TEST_CASE_METHOD(SmartsAnalyzerFixture, "SmartsAnalyzer: calculate_dof simple", "[SmartsAnalyzer]") {
     CHECK(analyzer.calculate_dof("[C]") == 1);
@@ -203,6 +231,141 @@ TEST_CASE_METHOD(SmartsAnalyzerFixture, "SmartsAnalyzer: enumerate_variants with
     for (const auto& v : variants) {
         CHECK((v.find("-") != std::string::npos || v.size() > 3)); // May have implicit bonds
     }
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+                 "SmartsAnalyzer: enumerate_variants preserves negated primitives",
+                 "[SmartsAnalyzer]") {
+    const auto variants = analyzer.enumerate_variants("[#6&!H1:1]=[#6:2]", 10);
+    REQUIRE_FALSE(variants.empty());
+
+    bool saw_negated = false;
+    for (const auto &v : variants) {
+        if (v.find("!H1") != std::string::npos) {
+            saw_negated = true;
+        }
+    }
+    CHECK(saw_negated);
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+                 "SmartsAnalyzer: reject dangling bond OR arm",
+                 "[SmartsAnalyzer]") {
+    CHECK_THROWS_WITH(analyzer.enumerate_variants("[C]=,[C]", 10),
+                      Catch::Matchers::ContainsSubstring(
+                          "Invalid SMARTS: dangling bond OR arm"));
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture, "SmartsAnalyzer: enumerate_variants splits OR bonds", "[SmartsAnalyzer]") {
+    auto variants = analyzer.enumerate_variants("[#6]:,-[c&!H1]", 10);
+    CHECK(variants.size() == 2);
+
+    bool saw_aromatic_bond = false;
+    bool saw_single_bond = false;
+    for (const auto &v : variants) {
+        CHECK(v.find(":,-") == std::string::npos);
+        if (v.find(":") != std::string::npos) {
+            saw_aromatic_bond = true;
+        }
+        if (v.find("-") != std::string::npos) {
+            saw_single_bond = true;
+        }
+    }
+    CHECK(saw_aromatic_bond);
+    CHECK(saw_single_bond);
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+                 "SmartsAnalyzer: recursive flatten also emits discard variant",
+                 "[SmartsAnalyzer]") {
+    auto variants = analyzer.enumerate_variants("[#6][c$([c][#6])]", 20);
+
+    bool saw_inline = false;
+    bool saw_discard = false;
+    for (const auto &v : variants) {
+        if (v == "[#6][c][#6]") {
+            saw_inline = true;
+        }
+        if (v == "[#6][c]") {
+            saw_discard = true;
+        }
+    }
+
+    CHECK(saw_inline);
+    CHECK(saw_discard);
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+                 "SmartsAnalyzer: recursive-only atom syntax is equivalent",
+                 "[SmartsAnalyzer]") {
+    auto variants = analyzer.enumerate_variants("[#6][$([c][#6])]", 20);
+
+    bool saw_inline = false;
+    bool saw_discard = false;
+    for (const auto &v : variants) {
+        if (v == "[#6][c][#6]") {
+            saw_inline = true;
+        }
+        if (v == "[#6][c]") {
+            saw_discard = true;
+        }
+    }
+
+    CHECK(saw_inline);
+    CHECK(saw_discard);
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+                 "SmartsAnalyzer: recursive flatten preserves branching",
+                 "[SmartsAnalyzer]") {
+    auto variants = analyzer.enumerate_variants("[#6:1](O)[$([c:3][#6:5]O)]", 20);
+
+    bool saw_inline = false;
+    bool saw_discard = false;
+    for (const auto &v : variants) {
+        if (v == "[#6:1]([O])[c:3][#6:5][O]") {
+            saw_inline = true;
+        }
+        if (v == "[#6:1]([O])[c:3]") {
+            saw_discard = true;
+        }
+    }
+
+    CHECK(saw_inline);
+    CHECK(saw_discard);
+}
+
+TEST_CASE_METHOD(SmartsAnalyzerFixture,
+                 "SmartsAnalyzer: recursive flatten keeps multi-tail branching",
+                 "[SmartsAnalyzer]") {
+    auto variants = analyzer.enumerate_variants(
+        "[#6;H0;+0;a;D1,D3&$([#6](:[a])(:[a]))]", 20);
+
+    bool saw_branched = false;
+    bool saw_linearized = false;
+    for (const auto &v : variants) {
+        if (v.find("(:a):a") != std::string::npos) {
+            saw_branched = true;
+        }
+        if (v.find(":a:a") != std::string::npos) {
+            saw_linearized = true;
+        }
+    }
+
+    CHECK(saw_branched);
+    CHECK_FALSE(saw_linearized);
+}
+
+TEST_CASE_METHOD(
+    SmartsAnalyzerFixture,
+    "SmartsAnalyzer: complex recursive OR with atom maps does not crash",
+    "[SmartsAnalyzer]") {
+    const std::string input =
+        "[$([!#1&!#6:2]1=[!#1&!#6:3]-[#6:4]1),$([!#1&!#6:5]1-[!#6&!#1:6]=[#6:7]1):1]";
+
+    std::vector<std::string> variants;
+    CHECK_NOTHROW(variants = analyzer.enumerate_variants(input, 1000));
+    CHECK_FALSE(variants.empty());
 }
 
 // Test that variants are all valid SMARTS

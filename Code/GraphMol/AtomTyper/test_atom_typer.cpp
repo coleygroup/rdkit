@@ -1,5 +1,7 @@
 #include <GraphMol/AtomTyper/atom_typer.hpp>
+#include <GraphMol/AtomTyper/smarts_analyzer.hpp>
 #include <catch2/catch_all.hpp>
+#include <map>
 #include <stdexcept>
 
 struct AtomTyperFixture {
@@ -138,6 +140,155 @@ TEST_CASE_METHOD(AtomTyperFixture,
         enumerated.find("+") != std::string::npos ||
         enumerated.find("-") != std::string::npos;
     CHECK(has_charge_token);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: enumerate_dof_smarts preserves branching",
+                 "[AtomTyper]") {
+    const std::string smarts = "[#6:1](O)[$([c:3][#6:5]O)]";
+    const std::string enumerated = typer.enumerate_dof_smarts(smarts);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find("[") != std::string::npos);
+    CHECK(enumerated.find("]") != std::string::npos);
+    CHECK(enumerated.find("([") != std::string::npos);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: enumerate_dof_smarts maps newly introduced atoms",
+                 "[AtomTyper][enumerate_dof_map_new_atoms]") {
+    const std::string smarts = "[C:1]=[C:2]";
+    const std::string enumerated = typer.enumerate_dof_smarts(smarts, true);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find(":1") != std::string::npos);
+    CHECK(enumerated.find(":2") != std::string::npos);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: enumerate_dof_smarts handles complex bond OR variants",
+                 "[AtomTyper][enumerate_dof_complex_bonds]") {
+    atom_typer::SmartsAnalyzer analyzer;
+    const auto variants = analyzer.enumerate_variants("[#6:1]=,-,:[#6:2]", 1000);
+
+    REQUIRE(variants.size() == 3);
+    for (const auto& v : variants) {
+        INFO("Variant: " << v);
+        const auto enumerated = typer.enumerate_dof_smarts(v);
+        CHECK_FALSE(enumerated.empty());
+    }
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: aromatic constrained atom is not collapsed",
+                 "[AtomTyper]") {
+    const std::string smarts = "[#6:1]:[c&H2&+0]";
+    CHECK_THROWS_WITH(
+        typer.enumerate_dof_smarts(smarts),
+        Catch::Matchers::ContainsSubstring(
+            "No valid DoF atom alternatives could be generated") &&
+            Catch::Matchers::ContainsSubstring("source_smarts='"));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: reorder_query_tree_by_embedding orders AtomAnd",
+                 "[AtomTyper]") {
+    const std::string smarts = "[#6&H1&+0]";
+    const std::map<std::string, double> embedding = {
+        {"#6", 10.0}, {"H1", 1.0}, {"+0", 5.0}};
+
+    const std::string reordered =
+        typer.reorder_query_tree_by_embedding(smarts, embedding);
+    CHECK_FALSE(reordered.empty());
+    CHECK(reordered.find("H1") != std::string::npos);
+    CHECK(reordered.find("+0") != std::string::npos);
+    CHECK(reordered.find("#6") != std::string::npos);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: reorder_query_tree_by_embedding orders AtomOr",
+                 "[AtomTyper]") {
+    const std::string smarts = "[#6,#7,#8]";
+    const std::map<std::string, double> embedding = {
+        {"#6", 10.0}, {"#7", 1.0}, {"#8", 5.0}};
+
+    const std::string reordered =
+        typer.reorder_query_tree_by_embedding(smarts, embedding);
+    CHECK_FALSE(reordered.empty());
+    CHECK(reordered.find("#6") != std::string::npos);
+    CHECK(reordered.find("#7") != std::string::npos);
+    CHECK(reordered.find("#8") != std::string::npos);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: default embedding is usable",
+                 "[AtomTyper]") {
+    const auto embedding = typer.get_default_query_embedding();
+    CHECK_FALSE(embedding.empty());
+    CHECK(embedding.count("#6") > 0);
+    CHECK(embedding.count("!H0") > 0);
+
+    const std::string reordered =
+        typer.reorder_query_tree_by_embedding("[#6&H1&+0]", embedding);
+    CHECK_FALSE(reordered.empty());
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: is_valid_valence_smarts for fully typed patterns",
+                 "[AtomTyper]") {
+    const std::string valid =
+        "[#6&D4&H3&+0&A:1]-[#6&D4&H3&+0&A:2]";
+    const std::string invalid = "[#6&D5&H0&+0&A]";
+
+    CHECK(typer.is_valid_valence_smarts(valid));
+    CHECK_FALSE(typer.is_valid_valence_smarts(invalid));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: is_valid_valence_smarts rejects aromatic bond between aliphatic-only atoms",
+                 "[AtomTyper]") {
+    const std::string invalid = "[#6&D0&H3&+&A:1]:[#6&D0&H3&+&A:2]";
+    CHECK_FALSE(typer.is_valid_valence_smarts(invalid));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: is_valid_valence_smarts rejects aliphatic bond between aromatic-only atoms",
+                 "[AtomTyper]") {
+    const std::string invalid = "[#6&D3&H0&+0&a:1]-[#6&D3&H0&+0&a:2]";
+    CHECK_FALSE(typer.is_valid_valence_smarts(invalid));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: is_valid_valence_smarts handles negated primitives",
+                 "[AtomTyper]") {
+    CHECK(typer.is_valid_valence_smarts("[#6;!H1]"));
+    CHECK_FALSE(typer.is_valid_valence_smarts("[#6;H1;!H1]"));
+    CHECK_FALSE(typer.is_valid_valence_smarts("[#6;+1;!+1]"));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: filter_invalid_valence_smarts discards invalid",
+                 "[AtomTyper]") {
+    const std::vector<std::string> input = {
+    "[#6&D4&H3&+0&A:1]-[#6&D4&H3&+0&A:2]",
+        "[#6&D0&H3&+&A:1]:[#6&D0&H3&+&A:2]",
+    "[#6;H1;!H1]",
+        "[#6&D5&H0&+0&A]"};
+
+    const auto filtered = typer.filter_invalid_valence_smarts(input);
+    REQUIRE(filtered.size() == 1);
+    CHECK(filtered[0] == input[0]);
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: enumerate_dof_smarts preserves negated atomic-number atoms",
+                 "[AtomTyper]") {
+    const std::string smarts = "[!#6:1]=[!#6:2]";
+    const std::string enumerated = typer.enumerate_dof_smarts(smarts);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find("!#6") != std::string::npos);
+    CHECK(enumerated.find("#0") == std::string::npos);
 }
 
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS bond counts and hybridization", "[AtomTyper]") {
