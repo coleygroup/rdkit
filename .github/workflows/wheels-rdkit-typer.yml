@@ -68,9 +68,9 @@ jobs:
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            sh -c 'LIBDIR=$(find /tmp -type f -name "libRDKitRDChemDrawLib.so*" -printf "%h\n" | head -n1);
-            if [ -n "$LIBDIR" ]; then export LD_LIBRARY_PATH="$LIBDIR:$LD_LIBRARY_PATH"; fi;
-            auditwheel repair -w {dest_dir} {wheel}'
+            RDKIT_LIB_DIRS=$(find /tmp -type f -name 'libRDKit*.so*' -printf '%h\n' | sort -u | tr '\n' ':');
+            export LD_LIBRARY_PATH="${RDKIT_LIB_DIRS}/opt/rdkit-deps/lib:${LD_LIBRARY_PATH}";
+            auditwheel repair -w {dest_dir} {wheel}
           # Linux uses manylinux containers. Bootstrap native deps inside container.
           CIBW_BEFORE_ALL_LINUX: >-
             set -euxo pipefail;
