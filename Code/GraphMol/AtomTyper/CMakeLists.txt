@@ -46,6 +46,12 @@ if(RDK_BUILD_ATOMTYPER_SMOKE)
     if(RDK_BUILD_TRACY)
         target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE TracyClient)
     endif()
+
+    add_executable(smartsAnalyzerPrimitivesSmoke smarts_analyzer_primitives_smoke.cpp)
+    target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE AtomTyper SmilesParse)
+    if(RDK_BUILD_TRACY)
+        target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE TracyClient)
+    endif()
 endif()
 
 if(RDK_BUILD_PYTHON_WRAPPERS)

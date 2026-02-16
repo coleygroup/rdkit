@@ -39,6 +39,7 @@ jobs:
           create-args: >-
             cmake
             ninja
+            boost
             boost-cpp
             libboost-devel
             libboost-python
@@ -63,6 +64,7 @@ jobs:
           CIBW_BUILD: cp312-*
           CIBW_SKIP: pp* *-musllinux*
           CIBW_ARCHS_LINUX: x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           # Linux uses manylinux containers. Bootstrap native deps inside container.
@@ -89,12 +91,28 @@ jobs:
           CIBW_ARCHS_MACOS: arm64
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >-
+            delocate-wheel --require-archs {delocate_archs} --ignore-missing-dependencies -w {dest_dir} -v {wheel}
           # macOS/Windows use the host-installed micromamba environment.
           CIBW_ENVIRONMENT_MACOS: >-
             CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }}
             Boost_DIR=${{ steps.micromamba.outputs.environment-path }}/lib/cmake/Boost-1.85.0
             PKG_CONFIG_PATH=${{ steps.micromamba.outputs.environment-path }}/lib/pkgconfig
             DYLD_FALLBACK_LIBRARY_PATH=${{ steps.micromamba.outputs.environment-path }}/lib
+
+      - name: Debug Boost config path (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $envPath = "${{ steps.micromamba.outputs.environment-path }}"
+          Write-Host "micromamba env: $envPath"
+          $boostDir = Join-Path $envPath "Library\lib\cmake\Boost-1.85.0"
+          Write-Host "Boost_DIR candidate: $boostDir"
+          if (Test-Path $boostDir) {
+            Get-ChildItem -Path $boostDir -File | Select-Object -ExpandProperty Name
+          } else {
+            Write-Error "Boost CMake directory not found at $boostDir"
+          }
 
       - name: Build wheels
         if: runner.os == 'Windows'
@@ -107,10 +125,10 @@ jobs:
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_ENVIRONMENT_WINDOWS: >-
-            CMAKE_PREFIX_PATH="${{ steps.micromamba.outputs.environment-path }};${{ steps.micromamba.outputs.environment-path }}\Library"
-            Boost_DIR="${{ steps.micromamba.outputs.environment-path }}\Library\lib\cmake\Boost-1.85.0"
-            INCLUDE="${{ steps.micromamba.outputs.environment-path }}\Library\include"
-            LIB="${{ steps.micromamba.outputs.environment-path }}\Library\lib;${{ steps.micromamba.outputs.environment-path }}\libs"
+            CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }}/Library
+            Boost_ROOT=${{ steps.micromamba.outputs.environment-path }}/Library
+            Boost_DIR=${{ steps.micromamba.outputs.environment-path }}/Library/lib/cmake/Boost-1.85.0
+            CMAKE_ARGS=-DCMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }}/Library -DBoost_ROOT=${{ steps.micromamba.outputs.environment-path }}/Library -DBoost_DIR=${{ steps.micromamba.outputs.environment-path }}/Library/lib/cmake/Boost-1.85.0
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
