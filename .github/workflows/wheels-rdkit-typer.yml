@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-14]
 
     steps:
       - name: Checkout
@@ -59,7 +59,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.21.3
         env:
           CIBW_CONFIG_FILE: cibuildwheel.toml
-          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
+          CIBW_BUILD: cp312-*
           CIBW_SKIP: pp* *-musllinux*
           CIBW_ARCHS_LINUX: x86_64
           CIBW_BEFORE_BUILD: >-
@@ -82,9 +82,9 @@ jobs:
         uses: pypa/cibuildwheel@v2.21.3
         env:
           CIBW_CONFIG_FILE: cibuildwheel.toml
-          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
+          CIBW_BUILD: cp312-*
           CIBW_SKIP: pp* *-musllinux*
-          CIBW_ARCHS_MACOS: x86_64 arm64
+          CIBW_ARCHS_MACOS: arm64
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           # macOS/Windows use the host-installed micromamba environment.
@@ -98,15 +98,15 @@ jobs:
         uses: pypa/cibuildwheel@v2.21.3
         env:
           CIBW_CONFIG_FILE: cibuildwheel.toml
-          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
+          CIBW_BUILD: cp312-*
           CIBW_SKIP: pp* *-musllinux*
           CIBW_ARCHS_WINDOWS: AMD64
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_ENVIRONMENT_WINDOWS: >-
-            CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }};${{ steps.micromamba.outputs.environment-path }}\Library
-            INCLUDE=${{ steps.micromamba.outputs.environment-path }}\Library\include
-            LIB=${{ steps.micromamba.outputs.environment-path }}\Library\lib;${{ steps.micromamba.outputs.environment-path }}\libs
+            CMAKE_PREFIX_PATH="${{ steps.micromamba.outputs.environment-path }};${{ steps.micromamba.outputs.environment-path }}\Library"
+            INCLUDE="${{ steps.micromamba.outputs.environment-path }}\Library\include"
+            LIB="${{ steps.micromamba.outputs.environment-path }}\Library\lib;${{ steps.micromamba.outputs.environment-path }}\libs"
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4

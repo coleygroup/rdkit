@@ -2,6 +2,7 @@
 requires = [
   "scikit-build-core>=0.10",
   "cmake>=3.18",
+  "numpy>=1.22",
   "ninja; platform_system != 'Windows'",
 ]
 build-backend = "scikit_build_core.build"
