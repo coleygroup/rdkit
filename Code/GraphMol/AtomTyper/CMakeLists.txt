@@ -33,16 +33,19 @@ rdkit_catch_test(testSmartsAnalyzer test_smarts_analyzer.cpp
 rdkit_catch_test(testExpressionBuilder test_expression_builder.cpp
                  LINK_LIBRARIES AtomTyper SmilesParse)
 
-add_executable(smartsAnalyzerSmoke smarts_analyzer_smoke.cpp)
-target_link_libraries(smartsAnalyzerSmoke PRIVATE AtomTyper SmilesParse SubstructMatch)
-if(RDK_BUILD_TRACY)
-    target_link_libraries(smartsAnalyzerSmoke PRIVATE TracyClient)
-endif()
+option(RDK_BUILD_ATOMTYPER_SMOKE "Build AtomTyper smoke executables" ON)
+if(RDK_BUILD_ATOMTYPER_SMOKE)
+    add_executable(smartsAnalyzerSmoke smarts_analyzer_smoke.cpp)
+    target_link_libraries(smartsAnalyzerSmoke PRIVATE AtomTyper SmilesParse SubstructMatch)
+    if(RDK_BUILD_TRACY)
+        target_link_libraries(smartsAnalyzerSmoke PRIVATE TracyClient)
+    endif()
 
-add_executable(smartsAnalyzerMatchsetSmoke smarts_analyzer_matchset_smoke.cpp)
-target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE AtomTyper SmilesParse SubstructMatch)
-if(RDK_BUILD_TRACY)
-    target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE TracyClient)
+    add_executable(smartsAnalyzerMatchsetSmoke smarts_analyzer_matchset_smoke.cpp)
+    target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE AtomTyper SmilesParse SubstructMatch)
+    if(RDK_BUILD_TRACY)
+        target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE TracyClient)
+    endif()
 endif()
 
 if(RDK_BUILD_PYTHON_WRAPPERS)

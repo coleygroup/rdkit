@@ -40,6 +40,7 @@ jobs:
             cmake
             ninja
             boost-cpp
+            libboost-devel
             libboost-python
             libboost-python-devel
             eigen
@@ -69,11 +70,12 @@ jobs:
             set -euxo pipefail;
             curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba;
             ./bin/micromamba create -y -p /opt/rdkit-deps -c conda-forge
-            cmake ninja boost-cpp libboost-python libboost-python-devel eigen cairo freetype libpng zlib expat;
+            cmake ninja boost-cpp libboost-devel libboost-python libboost-python-devel eigen cairo freetype libpng zlib expat;
             /opt/rdkit-deps/bin/cmake --version;
             ls -la /opt/rdkit-deps/lib || true
           CIBW_ENVIRONMENT_LINUX: >-
             CMAKE_PREFIX_PATH=/opt/rdkit-deps
+            Boost_DIR=/opt/rdkit-deps/lib/cmake/Boost-1.85.0
             PKG_CONFIG_PATH=/opt/rdkit-deps/lib/pkgconfig
             LD_LIBRARY_PATH=/opt/rdkit-deps/lib:$LD_LIBRARY_PATH
 
@@ -90,6 +92,7 @@ jobs:
           # macOS/Windows use the host-installed micromamba environment.
           CIBW_ENVIRONMENT_MACOS: >-
             CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }}
+            Boost_DIR=${{ steps.micromamba.outputs.environment-path }}/lib/cmake/Boost-1.85.0
             PKG_CONFIG_PATH=${{ steps.micromamba.outputs.environment-path }}/lib/pkgconfig
             DYLD_FALLBACK_LIBRARY_PATH=${{ steps.micromamba.outputs.environment-path }}/lib
 
@@ -105,6 +108,7 @@ jobs:
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_ENVIRONMENT_WINDOWS: >-
             CMAKE_PREFIX_PATH="${{ steps.micromamba.outputs.environment-path }};${{ steps.micromamba.outputs.environment-path }}\Library"
+            Boost_DIR="${{ steps.micromamba.outputs.environment-path }}\Library\lib\cmake\Boost-1.85.0"
             INCLUDE="${{ steps.micromamba.outputs.environment-path }}\Library\include"
             LIB="${{ steps.micromamba.outputs.environment-path }}\Library\lib;${{ steps.micromamba.outputs.environment-path }}\libs"
 
