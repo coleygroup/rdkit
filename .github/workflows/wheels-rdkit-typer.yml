@@ -55,9 +55,13 @@ jobs:
           echo "micromamba env path: ${{ steps.micromamba.outputs.environment-path }}"
 
       - name: Build wheels
+        if: runner.os == 'Linux'
         uses: pypa/cibuildwheel@v2.21.3
         env:
           CIBW_CONFIG_FILE: cibuildwheel.toml
+          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
+          CIBW_SKIP: pp* *-musllinux*
+          CIBW_ARCHS_LINUX: x86_64
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           # Linux uses manylinux containers. Bootstrap native deps inside container.
@@ -72,11 +76,33 @@ jobs:
             CMAKE_PREFIX_PATH=/opt/rdkit-deps
             PKG_CONFIG_PATH=/opt/rdkit-deps/lib/pkgconfig
             LD_LIBRARY_PATH=/opt/rdkit-deps/lib:$LD_LIBRARY_PATH
+
+      - name: Build wheels
+        if: runner.os == 'macOS'
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_CONFIG_FILE: cibuildwheel.toml
+          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
+          CIBW_SKIP: pp* *-musllinux*
+          CIBW_ARCHS_MACOS: x86_64 arm64
+          CIBW_BEFORE_BUILD: >-
+            python -m pip install --upgrade pip setuptools wheel numpy
           # macOS/Windows use the host-installed micromamba environment.
           CIBW_ENVIRONMENT_MACOS: >-
             CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }}
             PKG_CONFIG_PATH=${{ steps.micromamba.outputs.environment-path }}/lib/pkgconfig
             DYLD_FALLBACK_LIBRARY_PATH=${{ steps.micromamba.outputs.environment-path }}/lib
+
+      - name: Build wheels
+        if: runner.os == 'Windows'
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_CONFIG_FILE: cibuildwheel.toml
+          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
+          CIBW_SKIP: pp* *-musllinux*
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BEFORE_BUILD: >-
+            python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_ENVIRONMENT_WINDOWS: >-
             CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }};${{ steps.micromamba.outputs.environment-path }}\Library
             INCLUDE=${{ steps.micromamba.outputs.environment-path }}\Library\include
