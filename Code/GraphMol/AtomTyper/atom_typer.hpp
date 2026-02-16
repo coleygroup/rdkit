@@ -60,13 +60,17 @@ struct AtomType {
   std::optional<int> explicit_atomic_num;  // explicit atomic-number query
   std::optional<int> explicit_charge;      // explicit charge query
   std::optional<int> explicit_H;           // explicit H-count query
+  std::optional<int> explicit_lower_h;     // explicit implicit-H (h) query
   std::optional<int> explicit_D;           // explicit degree (D) query
   std::optional<int> explicit_X;           // explicit total degree (X) query
   std::optional<int> explicit_valence;     // explicit valence query
   std::optional<int> explicit_hybridization;  // explicit hybridization query
   std::optional<bool> explicit_aromatic;      // explicit aromatic query
   std::optional<bool> explicit_aliphatic;     // explicit aliphatic query
+  std::optional<bool> inferred_aromatic;      // inferred aromaticity flag
+  std::optional<bool> inferred_aliphatic;     // inferred aliphaticity flag
   std::optional<bool> explicit_in_ring;       // explicit ring-membership query
+  std::optional<int> explicit_ring_count;      // explicit ring-count query (R)
   std::optional<int> explicit_min_ring_size;  // explicit ring-size query
   std::vector<int> excluded_charges;          // negated charge primitives
   std::vector<int> excluded_h_counts;         // negated H-count primitives
@@ -113,24 +117,25 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
   ~AtomTyper();
 
   /**
-   * Type all atoms in a SMILES string
+   * Type a SMILES string into an ordered sequence of atoms and bonds
+   * (e.g. C=C => Atom0, Bond0, Atom1).
    * @param smiles The input SMILES string
-   * @return Vector of AtomType structures for each atom
+   * @return Vector of PatternItem structures for atoms/bonds in index order
    */
-  std::vector<AtomType> type_atoms_from_smiles(const std::string &smiles);
+  std::vector<PatternItem> type_atoms_from_smiles(const std::string &smiles);
 
-  /**
-   * Type all atoms in a SMARTS string
-   * @param smarts The input SMARTS string
-   * @return Vector of AtomType structures for each atom
-   */
-  std::vector<AtomType> type_atoms_from_smarts(const std::string &smarts);
+  // /**
+  //  * Type all atoms in a SMARTS string
+  //  * @param smarts The input SMARTS string
+  //  * @return Vector of AtomType structures for each atom
+  //  */
+  // std::vector<AtomType> type_atoms_from_smarts(const std::string &smarts);
 
   /**
    * Enumerate SMARTS atom local degrees-of-freedom (H, charge, D, X)
    * while preserving the original atom/bond order.
    */
-  std::string enumerate_dof_smarts(const std::string &smarts);
+  std::string type_atoms_from_smarts(const std::string &smarts);
 
   /**
    * Enumerate DOF SMARTS and optionally map newly introduced atoms.
@@ -138,28 +143,32 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
    * (including recursive SMARTS expressions) receive map numbers starting
    * at the next map index after the maximum existing map.
    */
-  std::string enumerate_dof_smarts(const std::string &smarts,
-                                   bool map_new_atoms, int &max_amap, bool verbose=false);
+  std::string type_atoms_from_smarts(const std::string &smarts,
+                                   bool map_new_atoms, int &max_amap,
+                                   bool verbose=false,
+                                   bool include_x_in_reserialization=false);
 
   /**
    * Overload: enumerate DOF SMARTS using custom default ranges for H and
    * formal charge when those constraints are not explicit in the query.
    */
-  std::string enumerate_dof_smarts(const std::string &smarts, int h_min,
+  std::string type_atoms_from_smarts(const std::string &smarts, int h_min,
                                    int h_max, int charge_min, int charge_max,
-                                   bool map_new_atoms, int &max_amap);
+                                   bool map_new_atoms, int &max_amap,
+                                   bool include_x_in_reserialization=false);
 
   /**
    * Overload: enumerate with custom ranges plus runtime verbosity controls.
    * If verbose=false, debug logging is disabled regardless of debug_level.
    */
-  std::string enumerate_dof_smarts(const std::string &smarts, int h_min,
+  std::string type_atoms_from_smarts(const std::string &smarts, int h_min,
                                    int h_max, int charge_min, int charge_max,
                                    bool verbose, DebugLevel debug_level,
-                                   bool map_new_atoms, int &max_amap);
+                                   bool map_new_atoms, int &max_amap,
+                                   bool include_x_in_reserialization=false);
   // Overload: enumerate with custom debug level but default H/charge ranges and
   // verbosity=true
-  std::string enumerate_dof_smarts(const std::string &smarts,
+  std::string type_atoms_from_smarts(const std::string &smarts,
                                    DebugLevel debug_level);
 
 //   std::string enumerate_dof_smarts(const std::string &smarts,

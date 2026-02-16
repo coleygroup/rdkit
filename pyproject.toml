@@ -1,0 +1,54 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.10",
+  "cmake>=3.18",
+  "ninja; platform_system != 'Windows'",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "rdkit-typer"
+version = "2026.3.1.post0"
+description = "RDKit fork with AtomTyper extensions"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "license.txt" }
+authors = [{ name = "RDKit contributors" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+[project.urls]
+Homepage = "https://www.rdkit.org"
+Repository = "https://github.com/rdkit/rdkit"
+
+[tool.scikit-build]
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+build.verbose = true
+wheel.packages = ["rdkit"]
+
+[tool.scikit-build.cmake.define]
+RDK_BUILD_PYTHON_WRAPPERS = "ON"
+RDK_BUILD_SWIG_WRAPPERS = "OFF"
+RDK_BUILD_CPP_TESTS = "OFF"
+RDK_BUILD_CONTRIB = "OFF"
+RDK_BUILD_PGSQL = "OFF"
+RDK_BUILD_FUZZ_TARGETS = "OFF"
+RDK_BUILD_LONG_RUNNING_TESTS = "OFF"
+RDK_INSTALL_INTREE = "OFF"
+RDK_INSTALL_DEV_COMPONENT = "OFF"
+RDK_INSTALL_STATIC_LIBS = "OFF"
+RDK_INSTALL_DLLS_MSVC = "ON"

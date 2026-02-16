@@ -4,10 +4,12 @@
 #include <GraphMol/MolOps.h>    // For molecule operations from RDKit molecule
 #include <GraphMol/SmilesParse/SmilesParse.h>  // For parsing SMILES strings
 #include <GraphMol/SmilesParse/SmartsWrite.h>  // For writing SMARTS strings
+#include <GraphMol/ChemTransforms/ChemTransforms.h>
 #include <GraphMol/Descriptors/MolDescriptors.h>  // For molecular descriptors like the AND/OR/NOT queries
 #include <GraphMol/QueryAtom.h>  // For QueryAtom and Query functionality
 #include <GraphMol/QueryBond.h>
-#include <GraphMol/QueryOps.h>    // For ATOM_EQUALS_QUERY and other query types
+#include <GraphMol/QueryOps.h>  // For ATOM_EQUALS_QUERY and other query types
+#include <GraphMol/Substruct/SubstructMatch.h>
 #include <Query/QueryObjects.h>   // For the base Query class
 #include <Query/EqualityQuery.h>  // For Equality Query functionality
 #include <sstream>  // For string stream operations, work with data types better
@@ -16,7 +18,17 @@
 #include <cctype>
 #include <functional>
 #include <map>
+#include <regex>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
+
+#if __has_include(<tracy/Tracy.hpp>)
+#include <tracy/Tracy.hpp>
+#else
+#define ZoneScoped
+#define ZoneScopedN(x)
+#endif
 
 // stop variable name clashing with other libraries
 namespace atom_typer {
@@ -1012,6 +1024,7 @@ SmartsAnalyzer::~SmartsAnalyzer() = default;
  */
 std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     const std::string &smarts, int max, bool verbose, bool carry_atom_maps) {
+  ZoneScopedN("SmartsAnalyzer::enumerate_variants");
   std::vector<std::string> results;
   if (verbose) {
     std::cerr << "[enumerate_variants] input='" << smarts << "' max=" << max
@@ -1023,8 +1036,11 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
   }
 
   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
+
   if (!mol) {
-    throw std::runtime_error("Invalid SMARTS");
+    std::cerr << "[enumerate_variants] failed to parse SMARTS: '" << smarts
+              << "'" << std::endl;
+    return results;
   }
 
   std::vector<unsigned int> input_atom_maps;
@@ -1112,7 +1128,8 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     results.push_back(smarts);
     return results;
   }
-  std::set<std::string> seen;
+  std::unordered_set<std::string> seen;
+  seen.reserve(static_cast<size_t>(std::max(16, max * 2)));
   std::vector<size_t> atom_choice(variant_ptrs.size(), 0);
   std::vector<size_t> bond_choice(bond_variant_ptrs.size(), 0);
 
@@ -1146,6 +1163,32 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     return token;
   };
 
+  // Ring-closure digits (e.g. "1", "%10") are outside atom brackets.
+  // If present in recursive SMARTS, do not flatten "$(...)" because the current
+  // subtree serializer is acyclic and can misserialize closures.
+  const auto has_ring_closure_marker = [](const std::string &txt) {
+    int bracket_depth = 0;
+    for (size_t i = 0; i < txt.size(); ++i) {
+      const char ch = txt[i];
+      if (ch == '[') {
+        ++bracket_depth;
+        continue;
+      }
+      if (ch == ']') {
+        if (bracket_depth > 0) {
+          --bracket_depth;
+        }
+        continue;
+      }
+      if (bracket_depth != 0) {
+        continue;
+      }
+      if (ch == '%' || std::isdigit(static_cast<unsigned char>(ch))) {
+        return true;
+      }
+    }
+    return false;
+  };
   std::function<std::string(const RDKit::ROMol &, unsigned int, int,
                             std::set<unsigned int> &)>
       serialize_recursive_subtree;
@@ -1186,12 +1229,22 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
   const auto flatten_atom_token = [&](const std::string &atom_token) {
     std::string inner = get_inner(atom_token);
     std::vector<std::string> appended_tails;
+    std::string recursive_anchor_inner;
 
+    size_t search_pos = 0;
     while (true) {
-      const auto qpos = inner.find("$(");
+      const auto qpos = inner.find("$(", search_pos);
       if (qpos == std::string::npos) {
         break;
       }
+
+      // Preserve negated recursive expressions exactly as-is (e.g. !$(...)).
+      // These are normalized later via normalize_negated_recursive_queries().
+      if (qpos > 0 && inner[qpos - 1] == '!') {
+        search_pos = qpos + 2;
+        continue;
+      }
+
       const size_t open_pos = qpos + 1;
       const size_t close_pos = matching_paren(inner, open_pos);
       if (close_pos == std::string::npos || close_pos <= open_pos + 1) {
@@ -1200,6 +1253,14 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
 
       const std::string recursive_smarts =
           inner.substr(open_pos + 1, close_pos - open_pos - 1);
+
+      // Preserve cyclic recursive expressions as "$(...)" to avoid
+      // ring-closure misserialization during flattening.
+      if (has_ring_closure_marker(recursive_smarts)) {
+        search_pos = close_pos + 1;
+        continue;
+      }
+
       std::unique_ptr<RDKit::ROMol> recursive_mol(
           RDKit::SmartsToMol(recursive_smarts));
       if (!recursive_mol || recursive_mol->getNumAtoms() == 0) {
@@ -1215,6 +1276,25 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
       inner.erase(erase_from, close_pos - erase_from + 1);
 
       auto *anchor = recursive_mol->getAtomWithIdx(0);
+      if (anchor && recursive_anchor_inner.empty()) {
+        recursive_anchor_inner = get_inner(
+            ensure_bracketed(RDKit::SmartsWrite::GetAtomSmarts(anchor)));
+        const auto colon = recursive_anchor_inner.rfind(':');
+        if (colon != std::string::npos &&
+            colon + 1 < recursive_anchor_inner.size()) {
+          bool all_digits = true;
+          for (size_t i = colon + 1; i < recursive_anchor_inner.size(); ++i) {
+            if (!std::isdigit(
+                    static_cast<unsigned char>(recursive_anchor_inner[i]))) {
+              all_digits = false;
+              break;
+            }
+          }
+          if (all_digits) {
+            recursive_anchor_inner = recursive_anchor_inner.substr(0, colon);
+          }
+        }
+      }
       for (const auto *nbr : recursive_mol->atomNeighbors(anchor)) {
         const unsigned int nidx = nbr->getIdx();
         auto *bond = recursive_mol->getBondBetweenAtoms(0, nidx);
@@ -1230,13 +1310,34 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
                                    subtree);
         }
       }
+
+      search_pos = erase_from;
     }
 
     while (inner.find("&&") != std::string::npos) {
       inner.replace(inner.find("&&"), 2, "&");
     }
+    while (!inner.empty() && (inner.front() == '&' || inner.front() == ';' ||
+                              inner.front() == ',')) {
+      inner.erase(inner.begin());
+    }
     while (!inner.empty() && (inner.back() == '&' || inner.back() == ';')) {
       inner.pop_back();
+    }
+
+    if (!recursive_anchor_inner.empty() && !inner.empty() &&
+        inner.front() == ':') {
+      inner = recursive_anchor_inner + inner;
+    } else if (!recursive_anchor_inner.empty() && inner.empty()) {
+      inner = recursive_anchor_inner;
+    }
+
+    // If recursive flattening removed the only atom primitive, keep token
+    // valid. Example: "$([N...]):1" -> ":1" must become "*:1".
+    if (inner.empty()) {
+      inner = "*";
+    } else if (!inner.empty() && inner.front() == ':') {
+      inner.insert(inner.begin(), '*');
     }
 
     std::string out = "[" + inner + "]";
@@ -1323,7 +1424,6 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
             }
           }
           candidate = RDKit::MolToSmarts(*check);
-          check.reset(RDKit::SmartsToMol(candidate));
         }
         if (check && seen.insert(candidate).second) {
           if (verbose) {
@@ -1386,7 +1486,7 @@ std::string SmartsAnalyzer::add_atom_maps(const std::string &smarts,
   unsigned int next_map = start_map;
   std::set<const RDKit::ROMol *> visited;
 
-  std::function<void(RDKit::ROMol &)> assign_maps_in_mol;
+  std::function<void(RDKit::ROMol &, bool)> assign_maps_in_mol;
   std::function<void(const AtomQuery *)> visit_query;
 
   visit_query = [&](const AtomQuery *q) {
@@ -1397,7 +1497,8 @@ std::string SmartsAnalyzer::add_atom_maps(const std::string &smarts,
     const auto *rsq = dynamic_cast<const RDKit::RecursiveStructureQuery *>(q);
     if (rsq && rsq->getQueryMol()) {
       auto *submol = const_cast<RDKit::ROMol *>(rsq->getQueryMol());
-      assign_maps_in_mol(*submol);
+      // Recursive SMARTS: keep the first token (anchor atom, idx 0) unmapped.
+      assign_maps_in_mol(*submol, true);
     }
 
     for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
@@ -1405,14 +1506,22 @@ std::string SmartsAnalyzer::add_atom_maps(const std::string &smarts,
     }
   };
 
-  assign_maps_in_mol = [&](RDKit::ROMol &target) {
+  assign_maps_in_mol = [&](RDKit::ROMol &target,
+                           bool skip_first_atom_map_in_this_mol) {
     if (visited.count(&target)) {
       return;
     }
     visited.insert(&target);
 
     for (auto *atom : target.atoms()) {
-      atom->setAtomMapNum(next_map++);
+      if (skip_first_atom_map_in_this_mol && atom->getIdx() == 0) {
+        // Do not map the first token of a recursive expression.
+        atom->setAtomMapNum(0);
+        // Keep numbering deterministic/stable for downstream processing.
+        // ++next_map;
+      } else {
+        atom->setAtomMapNum(next_map++);
+      }
     }
 
     for (auto *atom : target.atoms()) {
@@ -1424,7 +1533,7 @@ std::string SmartsAnalyzer::add_atom_maps(const std::string &smarts,
     }
   };
 
-  assign_maps_in_mol(*mol);
+  assign_maps_in_mol(*mol, false);
   return RDKit::MolToSmarts(*mol);
 }
 
@@ -1472,14 +1581,674 @@ int SmartsAnalyzer::calculate_dof(const std::string &smarts) {
   }
 }
 
+namespace {
+
+std::string strip_brackets_and_map(std::string token) {
+  if (token.size() >= 2 && token.front() == '[' && token.back() == ']') {
+    token = token.substr(1, token.size() - 2);
+  }
+  const auto colon = token.rfind(':');
+  if (colon != std::string::npos && colon + 1 < token.size()) {
+    bool all_digits = true;
+    for (size_t i = colon + 1; i < token.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(token[i]))) {
+        all_digits = false;
+        break;
+      }
+    }
+    if (all_digits) {
+      token = token.substr(0, colon);
+    }
+  }
+  return token;
+}
+
+bool is_explicit_hydrogen_atom(const RDKit::Atom *atom) {
+  if (!atom) {
+    return false;
+  }
+  if (atom->getAtomicNum() == 1) {
+    return true;
+  }
+
+  const std::string token =
+      strip_brackets_and_map(RDKit::SmartsWrite::GetAtomSmarts(atom));
+  if (token.size() >= 2 && token[0] == '#' &&
+      std::isdigit(static_cast<unsigned char>(token[1]))) {
+    size_t pos = 1;
+    while (pos < token.size() &&
+           std::isdigit(static_cast<unsigned char>(token[pos]))) {
+      ++pos;
+    }
+    const int anum = std::stoi(token.substr(1, pos - 1));
+    if (anum == 1) {
+      return true;
+    }
+  }
+  if (token == "H") {
+    return true;
+  }
+  if (token.size() > 1 && token[0] == 'H') {
+    return std::all_of(token.begin() + 1, token.end(), [](char c) {
+      return std::isdigit(static_cast<unsigned char>(c));
+    });
+  }
+  return false;
+}
+
+bool is_h_primitive_delim(char ch) {
+  return ch == ';' || ch == '&' || ch == ',';
+}
+
+bool is_degree_primitive_delim(char ch) {
+  return ch == ';' || ch == '&' || ch == ',';
+}
+
+void analyze_h_primitives(const std::string &inner, bool &has_positive_h,
+                          bool &has_positive_h0, bool &has_negated_h,
+                          bool &has_negated_h0) {
+  has_positive_h = false;
+  has_positive_h0 = false;
+  has_negated_h = false;
+  has_negated_h0 = false;
+
+  int paren_depth = 0;
+  for (size_t i = 0; i < inner.size(); ++i) {
+    const char ch = inner[i];
+    if (ch == '(') {
+      ++paren_depth;
+      continue;
+    }
+    if (ch == ')') {
+      --paren_depth;
+      continue;
+    }
+    if (paren_depth != 0) {
+      continue;
+    }
+
+    // Negated H primitive: !H, !H0, !H1 ...
+    if (ch == '!' && i + 1 < inner.size() && inner[i + 1] == 'H') {
+      size_t j = i + 2;
+      while (j < inner.size() &&
+             std::isdigit(static_cast<unsigned char>(inner[j]))) {
+        ++j;
+      }
+      if (j == inner.size() || is_h_primitive_delim(inner[j])) {
+        has_negated_h = true;
+        const std::string tok = inner.substr(i + 1, j - (i + 1));
+        if (tok == "H0") {
+          has_negated_h0 = true;
+        }
+      }
+      i = (j > i ? j - 1 : i);
+      continue;
+    }
+
+    // Positive H primitive: H, H0, H1 ...
+    if (ch == 'H') {
+      const bool at_start_or_delim =
+          (i == 0) || is_h_primitive_delim(inner[i - 1]);
+      if (!at_start_or_delim || (i > 0 && inner[i - 1] == '!')) {
+        continue;
+      }
+      size_t j = i + 1;
+      while (j < inner.size() &&
+             std::isdigit(static_cast<unsigned char>(inner[j]))) {
+        ++j;
+      }
+      if (j == inner.size() || is_h_primitive_delim(inner[j])) {
+        has_positive_h = true;
+        const std::string tok = inner.substr(i, j - i);
+        if (tok == "H0") {
+          has_positive_h0 = true;
+        }
+      }
+      i = (j > i ? j - 1 : i);
+    }
+  }
+}
+
+std::string replace_positive_h0_with_h_count(const std::string &inner,
+                                             unsigned int h_count) {
+  std::string out;
+  out.reserve(inner.size() + 8);
+
+  int paren_depth = 0;
+  for (size_t i = 0; i < inner.size(); ++i) {
+    const char ch = inner[i];
+    if (ch == '(') {
+      ++paren_depth;
+      out.push_back(ch);
+      continue;
+    }
+    if (ch == ')') {
+      --paren_depth;
+      out.push_back(ch);
+      continue;
+    }
+
+    if (paren_depth == 0 && ch == 'H') {
+      const bool at_start_or_delim =
+          (i == 0) || is_h_primitive_delim(inner[i - 1]);
+      if (at_start_or_delim && !(i > 0 && inner[i - 1] == '!')) {
+        size_t j = i + 1;
+        while (j < inner.size() &&
+               std::isdigit(static_cast<unsigned char>(inner[j]))) {
+          ++j;
+        }
+        if (j == inner.size() || is_h_primitive_delim(inner[j])) {
+          const std::string tok = inner.substr(i, j - i);
+          if (tok == "H0") {
+            out += "H" + std::to_string(h_count);
+            i = j - 1;
+            continue;
+          }
+        }
+      }
+    }
+
+    out.push_back(ch);
+  }
+
+  return out;
+}
+
+std::string decrement_positive_degree_primitives(const std::string &inner,
+                                                 unsigned int decrement_by) {
+  if (decrement_by == 0) {
+    return inner;
+  }
+
+  std::string out;
+  out.reserve(inner.size() + 8);
+
+  int paren_depth = 0;
+  for (size_t i = 0; i < inner.size(); ++i) {
+    const char ch = inner[i];
+    if (ch == '(') {
+      ++paren_depth;
+      out.push_back(ch);
+      continue;
+    }
+    if (ch == ')') {
+      --paren_depth;
+      out.push_back(ch);
+      continue;
+    }
+
+    if (paren_depth == 0 && ch == 'D') {
+      const bool at_start_or_delim =
+          (i == 0) || is_degree_primitive_delim(inner[i - 1]);
+      if (at_start_or_delim && !(i > 0 && inner[i - 1] == '!')) {
+        size_t j = i + 1;
+        while (j < inner.size() &&
+               std::isdigit(static_cast<unsigned char>(inner[j]))) {
+          ++j;
+        }
+        if (j == inner.size() || is_degree_primitive_delim(inner[j])) {
+          unsigned int d_value = 1;
+          if (j > i + 1) {
+            d_value = static_cast<unsigned int>(
+                std::stoul(inner.substr(i + 1, j - (i + 1))));
+          }
+          const unsigned int updated_d =
+              (d_value > decrement_by) ? (d_value - decrement_by) : 0;
+          out += "D" + std::to_string(updated_d);
+          i = j - 1;
+          continue;
+        }
+      }
+    }
+
+    out.push_back(ch);
+  }
+
+  return out;
+}
+
+std::string set_or_append_lowercase_h_count(const std::string &inner,
+                                            unsigned int h_count) {
+  std::string out;
+  out.reserve(inner.size() + 8);
+
+  bool replaced = false;
+  int paren_depth = 0;
+  for (size_t i = 0; i < inner.size(); ++i) {
+    const char ch = inner[i];
+    if (ch == '(') {
+      ++paren_depth;
+      out.push_back(ch);
+      continue;
+    }
+    if (ch == ')') {
+      --paren_depth;
+      out.push_back(ch);
+      continue;
+    }
+
+    if (!replaced && paren_depth == 0 && ch == 'h') {
+      const bool at_start_or_delim =
+          (i == 0) || is_h_primitive_delim(inner[i - 1]);
+      if (at_start_or_delim && !(i > 0 && inner[i - 1] == '!')) {
+        size_t j = i + 1;
+        while (j < inner.size() &&
+               std::isdigit(static_cast<unsigned char>(inner[j]))) {
+          ++j;
+        }
+        if (j == inner.size() || is_h_primitive_delim(inner[j])) {
+          out += "h" + std::to_string(h_count);
+          i = j - 1;
+          replaced = true;
+          continue;
+        }
+      }
+    }
+
+    out.push_back(ch);
+  }
+
+  if (!replaced) {
+    if (!out.empty() && out.back() != ';') {
+      out += ';';
+    }
+    out += "h" + std::to_string(h_count);
+  }
+
+  return out;
+}
+
+size_t find_matching_paren(const std::string &txt, size_t open_pos) {
+  int depth = 0;
+  for (size_t i = open_pos; i < txt.size(); ++i) {
+    if (txt[i] == '(') {
+      ++depth;
+    } else if (txt[i] == ')') {
+      --depth;
+      if (depth == 0) {
+        return i;
+      }
+    }
+  }
+  return std::string::npos;
+}
+
+std::string remove_recursive_expression_atom_maps(const std::string &smarts) {
+  const std::regex atom_re("\\[[^\\]]+\\]");
+
+  const auto strip_atom_maps_in_text = [&](const std::string &text) {
+    std::string out;
+    out.reserve(text.size());
+
+    size_t cursor = 0;
+    for (std::sregex_iterator it(text.begin(), text.end(), atom_re), end;
+         it != end; ++it) {
+      const auto &m = *it;
+      const size_t start = static_cast<size_t>(m.position());
+      const size_t len = static_cast<size_t>(m.length());
+      out += text.substr(cursor, start - cursor);
+      out += "[" + strip_brackets_and_map(m.str()) + "]";
+      cursor = start + len;
+    }
+    out += text.substr(cursor);
+
+    return out;
+  };
+
+  std::string out;
+  out.reserve(smarts.size());
+
+  size_t pos = 0;
+  while (pos < smarts.size()) {
+    const size_t qpos = smarts.find("$(", pos);
+    if (qpos == std::string::npos) {
+      out += smarts.substr(pos);
+      break;
+    }
+
+    out += smarts.substr(pos, qpos - pos);
+
+    const size_t open_pos = qpos + 1;  // '(' in '$('
+    const size_t close_pos = find_matching_paren(smarts, open_pos);
+    if (close_pos == std::string::npos || close_pos <= open_pos + 1) {
+      out += smarts.substr(qpos);
+      break;
+    }
+
+    const std::string inner =
+        smarts.substr(open_pos + 1, close_pos - open_pos - 1);
+    out += std::string("$(") + strip_atom_maps_in_text(inner) + ")";
+
+    pos = close_pos + 1;
+  }
+
+  return out;
+}
+
+std::string canonicalize_smarts_basic(const std::string &smarts) {
+  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
+  if (!mol) {
+    return smarts;
+  }
+  return RDKit::MolToSmarts(*mol);
+}
+
+std::string clear_atom_maps_in_smarts(const std::string &smarts) {
+  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
+  if (!mol) {
+    return smarts;
+  }
+  for (auto *atom : mol->atoms()) {
+    if (atom) {
+      atom->setAtomMapNum(0);
+    }
+  }
+  return RDKit::MolToSmarts(*mol);
+}
+
+std::string canonicalize_negated_recursive_inner(const std::string &inner) {
+  static thread_local int recursive_canon_depth = 0;
+
+  if (recursive_canon_depth > 0) {
+    return canonicalize_smarts_basic(inner);
+  }
+
+  ++recursive_canon_depth;
+  try {
+    atom_typer::SmartsAnalyzer sa;
+    const auto out = sa.standard_smarts({inner}, false);
+    --recursive_canon_depth;
+    if (!out.empty() && !out.front().empty()) {
+      return clear_atom_maps_in_smarts(out.front());
+    }
+    return clear_atom_maps_in_smarts(canonicalize_smarts_basic(inner));
+  } catch (...) {
+    --recursive_canon_depth;
+    return clear_atom_maps_in_smarts(canonicalize_smarts_basic(inner));
+  }
+}
+
+std::string normalize_negated_recursive_queries(const std::string &smarts) {
+  using AtomQuery = Queries::Query<int, const RDKit::Atom *, true>;
+
+  // Fast path: no negated recursive query syntax present.
+  if (smarts.find("!$(") == std::string::npos) {
+    return smarts;
+  }
+
+  const auto normalize_negated_recursive_in_atom_token =
+      [&](const std::string &atom_token) {
+        std::string token = atom_token;
+        if (token.size() < 2 || token.front() != '[' || token.back() != ']') {
+          return token;
+        }
+
+        std::string inner = token.substr(1, token.size() - 2);
+        size_t pos = 0;
+        while (true) {
+          const size_t qpos = inner.find("!$(", pos);
+          if (qpos == std::string::npos) {
+            break;
+          }
+
+          const size_t open_pos = qpos + 2;  // '(' in '!$('
+          const size_t close_pos = find_matching_paren(inner, open_pos);
+          if (close_pos == std::string::npos || close_pos <= open_pos + 1) {
+            break;
+          }
+
+          const std::string recursive_smarts =
+              inner.substr(open_pos + 1, close_pos - open_pos - 1);
+          const std::string canonical_recursive =
+              canonicalize_negated_recursive_inner(recursive_smarts);
+
+          inner.replace(open_pos + 1, close_pos - open_pos - 1,
+                        canonical_recursive);
+          pos = open_pos + 1 + canonical_recursive.size();
+        }
+
+        return "[" + inner + "]";
+      };
+
+  const std::function<bool(const AtomQuery *, bool)> has_negated_recursive =
+      [&](const AtomQuery *q, bool inherited_negation) {
+        if (!q) {
+          return false;
+        }
+
+        const bool effective_negation = inherited_negation ^ q->getNegation();
+        const std::string desc = q->getDescription();
+        if (desc == "RecursiveStructure" && effective_negation) {
+          return true;
+        }
+
+        bool child_negation = effective_negation;
+        if (desc == "AtomNot" || desc == "Not") {
+          child_negation = !effective_negation;
+        }
+
+        for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+          if (has_negated_recursive(it->get(), child_negation)) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+  std::unique_ptr<RDKit::ROMol> parsed(RDKit::SmartsToMol(smarts));
+  if (!parsed) {
+    return smarts;
+  }
+
+  RDKit::RWMol mol(*parsed);
+  for (auto *atom : mol.atoms()) {
+    auto *qatom = dynamic_cast<RDKit::QueryAtom *>(atom);
+    if (!qatom || !qatom->getQuery()) {
+      continue;
+    }
+    if (!has_negated_recursive(qatom->getQuery(), false)) {
+      continue;
+    }
+
+    const std::string atom_token = RDKit::SmartsWrite::GetAtomSmarts(qatom);
+    const std::string rewritten_token =
+        normalize_negated_recursive_in_atom_token(atom_token);
+    if (rewritten_token == atom_token) {
+      continue;
+    }
+
+    std::unique_ptr<RDKit::ROMol> one_atom(RDKit::SmartsToMol(rewritten_token));
+    if (!one_atom || one_atom->getNumAtoms() != 1) {
+      continue;
+    }
+
+    auto *src = dynamic_cast<RDKit::QueryAtom *>(one_atom->getAtomWithIdx(0));
+    if (!src || !src->getQuery()) {
+      continue;
+    }
+    qatom->setQuery(src->getQuery()->copy());
+  }
+
+  return RDKit::MolToSmarts(mol);
+}
+
+std::string move_explicit_hydrogens_to_not_h0(const std::string &smarts) {
+  const auto likely_has_explicit_h_atom = [](const std::string &s) {
+    for (size_t i = 0; i < s.size(); ++i) {
+      if (s[i] != '[' || i + 1 >= s.size()) {
+        continue;
+      }
+
+      const size_t j = i + 1;
+      if (s[j] == 'H') {
+        if (j + 1 >= s.size()) {
+          return true;
+        }
+        const char next = s[j + 1];
+        // Exclude element symbols like Hg.
+        if (!std::islower(static_cast<unsigned char>(next))) {
+          return true;
+        }
+      }
+
+      if (s[j] == '#' && j + 1 < s.size() && s[j + 1] == '1') {
+        const size_t k = j + 2;
+        if (k >= s.size() || !std::isdigit(static_cast<unsigned char>(s[k]))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // Fast path: no explicit hydrogen atom tokens to fold.
+  if (!likely_has_explicit_h_atom(smarts)) {
+    return smarts;
+  }
+
+  std::unique_ptr<RDKit::ROMol> parsed(RDKit::SmartsToMol(smarts));
+  if (!parsed) {
+    return smarts;
+  }
+
+  RDKit::RWMol mol(*parsed);
+  std::set<unsigned int> hydrogen_atom_indices;
+  std::map<unsigned int, unsigned int> explicit_hydrogen_count;
+
+  for (const auto *atom : mol.atoms()) {
+    if (!is_explicit_hydrogen_atom(atom)) {
+      continue;
+    }
+    if (atom->getDegree() != 1) {
+      continue;
+    }
+
+    const auto *nbr = *(mol.atomNeighbors(atom).begin());
+    if (!nbr) {
+      continue;
+    }
+
+    hydrogen_atom_indices.insert(atom->getIdx());
+    ++explicit_hydrogen_count[nbr->getIdx()];
+  }
+
+  for (const auto &entry : explicit_hydrogen_count) {
+    const auto atom_idx = entry.first;
+    const auto num_explicit_h = entry.second;
+    if (num_explicit_h == 0) {
+      continue;
+    }
+
+    auto *dst = dynamic_cast<RDKit::QueryAtom *>(mol.getAtomWithIdx(atom_idx));
+    if (!dst) {
+      continue;
+    }
+
+    std::string inner =
+        strip_brackets_and_map(RDKit::SmartsWrite::GetAtomSmarts(dst));
+    inner = set_or_append_lowercase_h_count(inner, num_explicit_h);
+
+    if (inner.empty()) {
+      inner = "*";
+    }
+    const std::string rewritten = "[" + inner + "]";
+    std::unique_ptr<RDKit::ROMol> probe(RDKit::SmartsToMol(rewritten));
+    if (!probe || probe->getNumAtoms() != 1) {
+      continue;
+    }
+    auto *src = dynamic_cast<RDKit::QueryAtom *>(probe->getAtomWithIdx(0));
+    if (!src || !src->getQuery()) {
+      continue;
+    }
+    dst->setQuery(src->getQuery()->copy());
+  }
+
+  std::vector<unsigned int> remove_indices(hydrogen_atom_indices.begin(),
+                                           hydrogen_atom_indices.end());
+  std::sort(remove_indices.begin(), remove_indices.end(), std::greater<>());
+  for (const auto idx : remove_indices) {
+    if (idx < mol.getNumAtoms()) {
+      mol.removeAtom(idx);
+    }
+  }
+
+  return RDKit::MolToSmarts(mol);
+}
+
+std::vector<std::string> perceive_tautomers(
+    const std::vector<std::string> &variants, bool verbose = false) {
+  struct TautomerRule {
+    std::string before;
+    std::string after;
+  };
+
+  // Rule list can be extended as needed.
+  // Current focus: nitro-like valence representations.
+  static const std::vector<TautomerRule> rules = {
+      {"[#7+:1](=[#8:2])=[#8:3]", "[#7+:1](=[#8:2])-[#8-:3]"},
+      {"[#7:1](=[#8:2])=[#8:3]", "[#7+:1](=[#8:2])-[#8-:3]"},
+  };
+
+  std::vector<std::string> out;
+  std::set<std::string> seen;
+  out.reserve(variants.size());
+
+  for (const auto &v : variants) {
+    std::string standardized = v;
+
+    std::unique_ptr<RDKit::ROMol> current(RDKit::SmartsToMol(standardized));
+    if (current) {
+      for (const auto &rule : rules) {
+        std::unique_ptr<RDKit::ROMol> before_q(RDKit::SmartsToMol(rule.before));
+        std::unique_ptr<RDKit::ROMol> after_q(RDKit::SmartsToMol(rule.after));
+        if (!before_q || !after_q) {
+          continue;
+        }
+
+        std::vector<RDKit::MatchVectType> matches;
+        if (!RDKit::SubstructMatch(*current, *before_q, matches) ||
+            matches.empty()) {
+          continue;
+        }
+
+        const auto replaced = RDKit::replaceSubstructs(
+            *current, *before_q, *after_q, false, 0, false);
+        if (!replaced.empty() && replaced.front()) {
+          current = std::make_unique<RDKit::ROMol>(*replaced.front());
+          standardized = RDKit::MolToSmarts(*current);
+          if (verbose) {
+            std::cerr << "[perceive_tautomers] applied rule '" << rule.before
+                      << "' -> '" << rule.after << "' on '" << v << "' => '"
+                      << standardized << "'" << std::endl;
+          }
+        }
+      }
+    }
+
+    if (seen.insert(standardized).second) {
+      out.push_back(std::move(standardized));
+    }
+  }
+
+  return out;
+}
+
+}  // namespace
+
 std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
-    std::vector<std::string> smarts_list, bool verbose) {
+    std::vector<std::string> smarts_list, bool verbose,
+    bool include_x_in_reserialization, bool ignoreValence, bool catchErrors) {
+  ZoneScopedN("SmartsAnalyzer::generate_all_combos");
   atom_typer::SmartsAnalyzer sa;
   atom_typer::AtomTyper at;
 
   std::vector<std::vector<std::string>> results;
+  std::unordered_map<std::string, std::string> h_merge_cache;
+  std::unordered_map<std::string, std::string> normalized_neg_recursive_cache;
+  std::unordered_map<std::string, bool> valence_cache;
   for (const auto &test1 : smarts_list) {
     std::vector<std::string> these_results;
+    // std::cout << "Processing SMARTS: " << test1 << std::endl;
     const std::string mapped_smarts = sa.add_atom_maps(test1);
     int max_amap = 0;
     auto mol = RDKit::SmartsToMol(mapped_smarts);
@@ -1494,34 +2263,114 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
     }
 
     const auto variants =
-        sa.enumerate_variants(mapped_smarts, 1000, false, true);
+        sa.enumerate_variants(mapped_smarts, 1000, verbose, true);
+
     if (verbose) {
-      std::cout << "Generated " << variants.size() << " variants:\n";
+      std::cout << "Generated " << variants.size() << " variants in r1.\n";
     }
     // const auto def = at.get_default_query_embedding();
     int intial_max_amap = max_amap;
     for (const auto &variant : variants) {
       max_amap = intial_max_amap;  // reset max_amap for next iteration
-      const auto variants2 = sa.enumerate_variants(
-          at.enumerate_dof_smarts(variant, false, max_amap), 1000, false,
-          false);
+      if (verbose) {
+        std::cout << ">>> Processing variant: " << variant << std::endl;
+      }
+      std::string h_merged_smarts;
+      {
+        auto hm_it = h_merge_cache.find(variant);
+        if (hm_it != h_merge_cache.end()) {
+          h_merged_smarts = hm_it->second;
+        } else {
+          h_merged_smarts = move_explicit_hydrogens_to_not_h0(variant);
+          h_merge_cache.emplace(variant, h_merged_smarts);
+        }
+      }
+      // if (verbose) {
+      //   std::cout << "Pre H-merge: " << variant << std::endl;
+      //   std::cout << "Post H-merge: " << h_merged_smarts << std::endl;
+      // }
+      std::string extracted_smarts;
+      try {
+        extracted_smarts =
+            at.type_atoms_from_smarts(h_merged_smarts, false, max_amap, verbose,
+                                      include_x_in_reserialization);
+      } catch (const std::exception &e) {
+        if (verbose) {
+          std::cerr << "Error processing variant '" << variant
+                    << "': " << e.what() << std::endl;
+        }
+        if (catchErrors) {
+          throw std::runtime_error("Error processing variant: " + variant +
+                                   " - " + std::string(e.what()));
+        } else {
+          extracted_smarts = h_merged_smarts;  // Fallback to H-merged SMARTS if
+                                               // processing fails.
+        }
+      }
+      if (verbose) {
+        std::cout << ">>> Extracted SMARTS: " << extracted_smarts << std::endl;
+      }
+      const auto variants2_taut =
+          sa.enumerate_variants(extracted_smarts, 1000, verbose, false);
+      // const auto variants2_taut = perceive_tautomers(variants2, verbose);
+
       bool seen_invalid = false;
-      for (const auto &v2 : variants2) {
-        if (at.is_valid_valence_smarts(v2, false)) {
+      std::vector<std::string> these_results_split;
+      std::unordered_set<std::string> local_seen;
+      local_seen.reserve(variants2_taut.size() * 2 + 1);
+      for (const auto &v2_raw : variants2_taut) {
+        std::string v2;
+        {
+          auto nnr_it = normalized_neg_recursive_cache.find(v2_raw);
+          if (nnr_it != normalized_neg_recursive_cache.end()) {
+            v2 = nnr_it->second;
+          } else {
+            v2 = normalize_negated_recursive_queries(v2_raw);
+            normalized_neg_recursive_cache.emplace(v2_raw, v2);
+          }
+        }
+
+        if (!local_seen.insert(v2).second) {
+          continue;
+        }
+
+        bool valence_ok = false;
+        {
+          auto vc_it = valence_cache.find(v2);
+          if (vc_it != valence_cache.end()) {
+            valence_ok = vc_it->second;
+          } else {
+            valence_ok = at.is_valid_valence_smarts(v2, verbose);
+            valence_cache.emplace(v2, valence_ok);
+          }
+        }
+
+        if (valence_ok) {
           if (verbose) {
             std::cout << "\t" << v2 << std::endl;
           }
-          these_results.push_back(v2);
+          // these_results.push_back(v2);
+          these_results_split.push_back(v2);
         } else {
           if (verbose) {
             std::cout << "  Invalid valence SMARTS: " << v2 << std::endl;
+          }
+          if (ignoreValence) {
+            these_results_split.push_back(v2);
           }
 
           seen_invalid = true;
         }
       }
+      std::string final_smarts = at.consolidate_smarts_with_recursive_paths(
+          at.consolidate_smarts_by_atom_maps(these_results_split));
+      these_results.push_back(final_smarts);
+      if (verbose) {
+        std::cout << " split console: " << final_smarts << std::endl;
+      }
     }
     if (verbose) {
+      std::cout << "<<< " << std::endl;
       std::cout << "\t" << std::endl;
     }
     results.push_back(std::move(these_results));
@@ -1530,34 +2379,111 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
 }
 
 std::vector<std::string> SmartsAnalyzer::standard_smarts(
-    const std::vector<std::string> &smarts_list, bool verbose) {
+    const std::vector<std::string> &smarts_list, bool verbose,
+    bool include_x_in_reserialization, bool ignoreValence, bool catchErrors) {
+  ZoneScopedN("SmartsAnalyzer::standard_smarts");
   atom_typer::SmartsAnalyzer sa;
   atom_typer::AtomTyper at;
   std::vector<std::vector<std::string>> results =
-      sa.generate_all_combos(smarts_list, verbose);
-  // std::cout << "Generated " << results.size() << " sets of variants:\n";
+      sa.generate_all_combos(smarts_list, verbose, include_x_in_reserialization,
+                             ignoreValence, catchErrors);
+
   int idx = 0;
   std::vector<std::string> out;
   out.reserve(results.size());
   for (const auto &res : results) {
-    // for (const auto &s : res) {
-    //   std::cout << s << std::endl;
-    // }
     std::string this_smarts = smarts_list[idx++];
-    std::vector<std::string> consolidated =
-        at.consolidate_smarts_by_atom_maps(res);
+    // std::vector<std::string> consolidated_pre_h =
+    //     at.consolidate_smarts_by_atom_maps(res);
+    // std::vector<std::string> h_merged;
+    // h_merged.reserve(res.size());
+    // for (const auto &s : res) {
+    //   std::string h_merged_smarts = move_explicit_hydrogens_to_not_h0(s);
+    //   h_merged.push_back(h_merged_smarts);
+    //   if (verbose) {
+    //     std::cout << "Pre H-merge: " << s << std::endl;
+    //     std::cout << "Post H-merge: " << h_merged_smarts << std::endl;
+    //   }
+    // }
+    if (verbose) {
+      std::cout << ">>> input: " << this_smarts << std::endl;
+      for (const auto &s : res) {
+        std::cout << "\t" << s << std::endl;
+      }
+    }
+    const auto mapped_atom_count = [](const std::string &s) -> size_t {
+      if (s.empty()) {
+        return 0;
+      }
+      std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(s));
+      if (!mol) {
+        return 0;
+      }
+      size_t count = 0;
+      for (const auto *atom : mol->atoms()) {
+        if (atom && atom->getAtomMapNum() > 0) {
+          ++count;
+        }
+      }
+      return count;
+    };
+
+    std::vector<std::string> non_empty;
+    non_empty.reserve(res.size());
+    for (const auto &s : res) {
+      if (!s.empty()) {
+        non_empty.push_back(s);
+      }
+    }
+
+    size_t max_mapped_atoms = 0;
+    for (const auto &s : non_empty) {
+      max_mapped_atoms = std::max(max_mapped_atoms, mapped_atom_count(s));
+    }
+
+    std::vector<std::string> preferred;
+    if (max_mapped_atoms > 0) {
+      preferred.reserve(non_empty.size());
+      for (const auto &s : non_empty) {
+        if (mapped_atom_count(s) == max_mapped_atoms) {
+          preferred.push_back(remove_recursive_expression_atom_maps(s));
+        }
+      }
+    }
+    if (preferred.empty()) {
+      preferred = non_empty;
+    }
+    if (preferred.empty()) {
+      preferred = res;
+    }
+
     std::string final_smarts =
-        at.consolidate_smarts_with_recursive_paths(consolidated);
+        at.consolidate_smarts_with_recursive_paths(preferred);
+    // if (max_mapped_atoms > 0 &&
+    //     mapped_atom_count(final_smarts) < max_mapped_atoms) {
+    //   auto fallback = at.consolidate_smarts_by_atom_maps(preferred);
+    //   if (!fallback.empty()) {
+    //     std::sort(fallback.begin(), fallback.end(),
+    //               [&](const std::string &a, const std::string &b) {
+    //                 const size_t am = mapped_atom_count(a);
+    //                 const size_t bm = mapped_atom_count(b);
+    //                 if (am != bm) {
+    //                   return am > bm;
+    //                 }
+    //                 if (a.size() != b.size()) {
+    //                   return a.size() < b.size();
+    //                 }
+    //                 return a < b;
+    //               });
+    //     final_smarts = fallback.front();
+    //   }
+    // }
+    final_smarts = remove_recursive_expression_atom_maps(final_smarts);
 
     if (verbose) {
-      std::cout << "Input SMARTS: " << this_smarts << std::endl;
-      std::cout << "Generated " << res.size() << " variants:\n";
-      std::cout << "\tConsolidated into " << consolidated.size()
-                << " SMARTS:\n";
-      for (const auto &s : consolidated) {
-        std::cout << "\t\t" << s << std::endl;
-      }
-      std::cout << "\tFinal consolidated SMARTS: " << final_smarts << std::endl;
+      // std::cout << "Input SMARTS: " << this_smarts << std::endl;
+      //   std::cout << "Generated " << res.size() << " variants:\n";
+      std::cout << "\t" << final_smarts << std::endl;
       std::cout << std::endl;
     }
     out.push_back(final_smarts);

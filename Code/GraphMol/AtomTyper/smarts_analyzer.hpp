@@ -51,10 +51,14 @@ class RDKIT_ATOMTYPER_EXPORT SmartsAnalyzer {
                             unsigned int start_map = 1);
 
   std::vector<std::vector<std::string>> generate_all_combos(
-      std::vector<std::string> smarts_list, bool verbose);
+      std::vector<std::string> smarts_list, bool verbose,
+      bool include_x_in_reserialization = false, bool ignoreValence = false,
+      bool catchErrors = true);
 
   std::vector<std::string> standard_smarts(
-      const std::vector<std::string> &smarts_list, bool verbose);
+      const std::vector<std::string> &smarts_list, bool verbose,
+      bool include_x_in_reserialization = false, bool ignoreValence = false,
+      bool catchErrors = true);
 
  private:
   class Impl;

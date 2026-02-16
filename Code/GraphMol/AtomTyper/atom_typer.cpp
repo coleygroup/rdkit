@@ -23,6 +23,13 @@
 #include <stdexcept>
 #include <tuple>
 
+#if __has_include(<tracy/Tracy.hpp>)
+#include <tracy/Tracy.hpp>
+#else
+#define ZoneScoped
+#define ZoneScopedN(x)
+#endif
+
 namespace atom_typer {
 
 /**
@@ -39,6 +46,7 @@ class AtomTyper::Impl {
     int charge_min = -1;
     int charge_max = 1;
     DebugLevel debug_level = DebugLevel::Off;
+    bool include_x_in_reserialization = false;
   };
 
   static int debug_level_to_int(DebugLevel level) {
@@ -49,13 +57,16 @@ class AtomTyper::Impl {
     std::optional<int> atomic_number;
     std::optional<int> formal_charge;
     std::optional<int> h_count;
+    std::optional<int> lower_h_count;
     std::optional<int> explicit_degree_query;  // SMARTS D primitive
     std::optional<int> total_degree;
     std::optional<int> valence;
+    std::optional<int> explicit_valence;
     std::optional<int> hybridization;
     std::optional<bool> aromatic;
     std::optional<bool> aliphatic;
     std::optional<bool> in_ring;
+    std::optional<int> ring_count;
     std::optional<int> min_ring_size;
     int min_bonds = 0;  // explicit topology neighbors in SMARTS graph
     std::vector<int> excluded_formal_charge;
@@ -90,9 +101,17 @@ class AtomTyper::Impl {
         constraints.atomic_number = eq->getVal();
       } else if (descr == "AtomFormalCharge" && eq) {
         constraints.formal_charge = eq->getVal();
-      } else if ((descr == "AtomHCount" || descr == "AtomImplicitHCount") &&
-                 eq) {
-        constraints.h_count = eq->getVal();
+      } else if (descr == "AtomHCount" && eq) {
+        if (constraints.lower_h_count.has_value()) {
+          constraints.h_count = eq->getVal();
+        } else {
+          constraints.h_count = eq->getVal();
+        }
+      } else if (descr == "AtomImplicitHCount" && eq) {
+        // if (constraints.h_count.has_value()) {
+        //   constraints.h_count =  eq->getVal();
+        // }
+        constraints.lower_h_count = eq->getVal();
       } else if (descr == "AtomExplicitDegree" && eq) {
         constraints.explicit_degree_query = eq->getVal();
       } else if (descr == "AtomTotalDegree" && eq) {
@@ -109,6 +128,9 @@ class AtomTyper::Impl {
         constraints.aliphatic = true;
       } else if (descr == "AtomInRing") {
         constraints.in_ring = true;
+      } else if ((descr == "AtomInNRings" || descr == "AtomRingCount") && eq) {
+        constraints.ring_count = eq->getVal();
+        constraints.in_ring = eq->getVal() > 0;
       } else if (descr == "AtomMinRingSize" && eq) {
         constraints.min_ring_size = eq->getVal();
         constraints.in_ring = true;
@@ -226,7 +248,10 @@ class AtomTyper::Impl {
       return -1;
     }
     const auto &ovalens = ptable->getValenceList(atomic_number);
-
+    // for (int ovalen : ovalens) {
+    //   std::cerr << ovalen << " ";
+    // }
+    // std::cerr << std::endl;
     unsigned int effective_atomic_num =
         static_cast<unsigned int>(atomic_number);
     if (ovalens.size() > 1 || ovalens[0] != -1) {
@@ -460,16 +485,87 @@ class AtomTyper::Impl {
 
     QueryConstraints constraints;
     collect_query_constraints(atom->getQuery(), constraints);
+
+    const auto infer_symbol_aromaticity_flags = [](const std::string &smarts) {
+      std::string token = smarts;
+      if (token.size() >= 2 && token.front() == '[' && token.back() == ']') {
+        token = token.substr(1, token.size() - 2);
+      }
+
+      const auto colon = token.rfind(':');
+      if (colon != std::string::npos && colon + 1 < token.size()) {
+        bool digits_only = true;
+        for (size_t i = colon + 1; i < token.size(); ++i) {
+          if (!std::isdigit(static_cast<unsigned char>(token[i]))) {
+            digits_only = false;
+            break;
+          }
+        }
+        if (digits_only) {
+          token = token.substr(0, colon);
+        }
+      }
+
+      const auto first_delim = token.find_first_of(";,&");
+      if (first_delim != std::string::npos) {
+        token = token.substr(0, first_delim);
+      }
+
+      while (!token.empty() && token.front() == '!') {
+        token.erase(token.begin());
+      }
+
+      // lowercase aromatic symbols
+      if (token == "c" || token == "n" || token == "o" || token == "p" ||
+          token == "s" || token == "as" || token == "se" || token == "a") {
+        return std::pair<std::optional<bool>, std::optional<bool>>{true, false};
+      }
+
+      // uppercase element symbols => aliphatic
+      if (token == "C" || token == "N" || token == "O" || token == "P" ||
+          token == "S" || token == "As" || token == "Se" || token == "A" ||
+          token == "F" || token == "Cl" || token == "Br" || token == "I") {
+        return std::pair<std::optional<bool>, std::optional<bool>>{false, true};
+      }
+
+      // atomic number representation for C/N/O/P/S => potentially both
+      if (token == "#6" || token == "#7" || token == "#8" || token == "#15" ||
+          token == "#16") {
+        return std::pair<std::optional<bool>, std::optional<bool>>{true, true};
+      }
+
+      // default fallback
+      return std::pair<std::optional<bool>, std::optional<bool>>{false, true};
+    };
+
+    const auto inferred_arom_flags =
+        infer_symbol_aromaticity_flags(at.source_atom_smarts);
+
+    // std::cout << "Inferred aromaticity flags: " << at.source_atom_smarts
+    //           << " -> " << inferred_arom_flags.first.value_or("None") << ", "
+    //           << inferred_arom_flags.second.value_or("None") << std::endl;
     at.explicit_atomic_num = constraints.atomic_number;
     at.explicit_charge = constraints.formal_charge;
+    // if (constraints.h_count.has_value() &&
+    // constraints.lower_h_count.has_value()) {
+    //   if (*constraints.h_count == *constraints.lower_h_count) {
+    //     at.explicit_H = NULL;
+    //   } else {
+    //     at.explicit_H = *constraints.h_count - *constraints.lower_h_count;
+    //   }
+    // }
     at.explicit_H = constraints.h_count;
+    at.explicit_lower_h = constraints.lower_h_count;
     at.explicit_D = constraints.explicit_degree_query;
     at.explicit_X = constraints.total_degree;
     at.explicit_valence = constraints.valence;
     at.explicit_hybridization = constraints.hybridization;
     at.explicit_aromatic = constraints.aromatic;
     at.explicit_aliphatic = constraints.aliphatic;
+    at.inferred_aromatic = inferred_arom_flags.first;
+    at.inferred_aliphatic = inferred_arom_flags.second;
     at.explicit_in_ring = constraints.in_ring;
+    at.explicit_ring_count = constraints.ring_count;
     at.explicit_min_ring_size = constraints.min_ring_size;
     at.excluded_charges = constraints.excluded_formal_charge;
     at.excluded_h_counts = constraints.excluded_h_count;
@@ -506,24 +602,23 @@ class AtomTyper::Impl {
       at.max_valence = default_valence;
     }
     at.hybridization = infer_hybridization_from_bonds(at);
-    const bool has_aromatic_constraint = constraints.aromatic.has_value();
-    const bool has_aliphatic_constraint = constraints.aliphatic.has_value();
-    if (has_aromatic_constraint) {
-      at.is_aromatic = *constraints.aromatic;
-      at.is_aliphatic = false;
+    if (at.explicit_aromatic.has_value()) {
+      at.is_aromatic = *at.explicit_aromatic;
+    } else {
+      at.is_aromatic = at.inferred_aromatic.value_or(at.is_aromatic);
     }
-    if (has_aliphatic_constraint) {
-      at.is_aliphatic = *constraints.aliphatic;
-      at.is_aromatic = false;
+    if (at.explicit_aliphatic.has_value()) {
+      at.is_aliphatic = *at.explicit_aliphatic;
+    } else {
+      at.is_aliphatic = at.inferred_aliphatic.value_or(at.is_aliphatic);
     }
-
-    // SMARTS like [#6] often carries only atomic-number constraints and should
-    // be treated as potentially matching either aliphatic (A) or aromatic (a).
-    if (constraints.atomic_number.has_value() && !has_aromatic_constraint &&
-        !has_aliphatic_constraint && !atom->getIsAromatic()) {
-      at.is_aromatic = true;
+    if (!at.is_aromatic && !at.is_aliphatic) {
       at.is_aliphatic = true;
     }
+    // }
+    // if (has_aliphatic_constraint) {
+    // }
+
     if (constraints.in_ring.has_value()) {
       at.is_in_ring = *constraints.in_ring;
       if (!at.is_in_ring) {
@@ -539,15 +634,6 @@ class AtomTyper::Impl {
     at.atom_type_enumeration =
         RDKit::makeAtomType(at.atomic_number, at.is_aromatic);
 
-    // if (constraints.valence.has_value()) {
-    //   const double used = used_connectivity_valence(atom, mol);
-    //   at.remaining_valence =
-    //       std::max(0, at.max_valence - static_cast<int>(std::floor(used)));
-    // } else {
-    //   at.remaining_valence =
-    //       static_cast<int>(remaining_valence_from_connectivity(
-    //           at.atomic_number, at.formal_charge, atom, mol));
-    // }
     at.remaining_valence = at.max_valence -
                            calculate_valence_from_connectivity(atom, mol) -
                            at.explicit_H.value_or(0);
@@ -822,7 +908,9 @@ class AtomTyper::Impl {
     // --- create the central atom ---
     auto *temp_atom = new RDKit::Atom(at.atomic_number);
     temp_atom->setFormalCharge(charge);
-    // temp_atom->setNumExplicitHs(h_count);
+    temp_atom->setNoImplicit(true);
+    temp_atom->setNumExplicitHs(
+        static_cast<unsigned int>(std::max(0, h_count)));
 
     const bool want_aromatic = arom;
     temp_atom->setIsAromatic(want_aromatic);
@@ -832,32 +920,64 @@ class AtomTyper::Impl {
     // --- if aromatic, embed into a minimal aromatic ring (benzene-like) ---
     // This guarantees sanitization/aromatic valence bookkeeping is possible.
     if (want_aromatic) {
+      int modeled_aromatic_bonds = aromatic_bonds;
+      // Query fragments may expose only one aromatic arm in the explicit
+      // SMARTS graph (e.g. terminal [c] in an aromatic path), while the
+      // matched atom still has two aromatic ring neighbors in the target.
+      // Model that underconstrained case as a minimal aromatic environment.
+      if (modeled_aromatic_bonds == 1) {
+        modeled_aromatic_bonds = 2;
+      }
+
       // In an aromatic ring, the atom will have 2 aromatic bonds in-ring.
       // If your counting expects something else, you'll need a fused-ring
       // builder. For now, we treat ring bonds as satisfying aromaticity
       // requirements.
-      if (aromatic_bonds != 0 && aromatic_bonds != 2) {
+      if (modeled_aromatic_bonds != 0 && modeled_aromatic_bonds != 2 &&
+          modeled_aromatic_bonds != 3) {
         // Conservative: refuse cases we can't model without fused systems.
         // (You can relax this if you implement fused-ring construction.)
         return false;
       }
 
-      // Build 5 additional aromatic atoms to make a 6-member ring
-      unsigned int ring[6];
+      // For [nH]-like aromatic heteroatoms, a 5-member aromatic context is a
+      // better minimal probe than benzene-like 6-member embedding.
+      int aromatic_ring_size = 6;
+      if ((at.atomic_number == 7 || at.atomic_number == 8 ||
+           at.atomic_number == 16) &&
+          h_count > 0) {
+        aromatic_ring_size = 5;
+      }
+
+      std::vector<unsigned int> ring(static_cast<size_t>(aromatic_ring_size));
       ring[0] = aidx;
 
-      for (int i = 1; i < 6; ++i) {
+      for (int i = 1; i < aromatic_ring_size; ++i) {
         auto *c = new RDKit::Atom(6);  // aromatic carbon
         c->setIsAromatic(true);
         ring[i] = temp_mol.addAtom(c, false, true);
       }
 
-      // Connect ring with aromatic bonds: 0-1-2-3-4-5-0
-      for (int i = 0; i < 6; ++i) {
-        int j = (i + 1) % 6;
+      // Connect ring with aromatic bonds.
+      for (int i = 0; i < aromatic_ring_size; ++i) {
+        int j = (i + 1) % aromatic_ring_size;
         temp_mol.addBond(ring[i], ring[j], RDKit::Bond::BondType::AROMATIC);
         auto *b = temp_mol.getBondBetweenAtoms(ring[i], ring[j]);
         b->setIsAromatic(true);
+      }
+
+      // Approximate fused aromatic environments where the probed atom has
+      // three aromatic neighbors (e.g., bridgehead-like aromatic atoms in
+      // fused systems). Add one extra aromatic neighbor to atom 0.
+      if (modeled_aromatic_bonds == 3) {
+        auto *c = new RDKit::Atom(6);
+        c->setIsAromatic(true);
+        const unsigned int fidx = temp_mol.addAtom(c, false, true);
+        temp_mol.addBond(aidx, fidx, RDKit::Bond::BondType::AROMATIC);
+        auto *b = temp_mol.getBondBetweenAtoms(aidx, fidx);
+        if (b) {
+          b->setIsAromatic(true);
+        }
       }
     }
 
@@ -874,26 +994,38 @@ class AtomTyper::Impl {
     add_nbrs(single_bonds, RDKit::Bond::BondType::SINGLE);
     add_nbrs(double_bonds, RDKit::Bond::BondType::DOUBLE);
     add_nbrs(triple_bonds, RDKit::Bond::BondType::TRIPLE);
+    add_nbrs(at.explicit_lower_h.value_or(0), RDKit::Bond::BondType::SINGLE);
 
     // IMPORTANT: do NOT add aromatic bonds to standalone neighbors here.
     // Aromatic bond types generally require both atoms to be aromatic *and*
     // part of an aromatic system; otherwise sanitization/property cache will
     // complain. We treat aromaticity as handled by the ring embedding above.
-
+    // if (debug_level_to_int(debug_level) >=
+    //     debug_level_to_int(DebugLevel::Verbose)) {
+    //   std::cerr << "Constructed probe molecule: "
+    //             << RDKit::MolToSmiles(temp_mol)
+    //             << " with properties: Z=" << at.atomic_number
+    //             << " H=" << h_count << " q=" << charge << " s=" <<
+    //             single_bonds
+    //             << " d=" << double_bonds << " t=" << triple_bonds
+    //             << " a=" << aromatic_bonds << " arom=" << (arom ? 1 : 0)
+    //             << std::endl;
+    // }
     // --- force valence computation / cache update ---
+    unsigned int failedOp = 0;
     try {
       // Use only properties sanitization for these synthetic probe molecules.
       // Full sanitization on intentionally odd intermediates (especially with
       // wildcard neighbors / aromatic probes) can trigger parser/sanitizer
       // instability on some platforms.
-      unsigned int failedOp = 0;
-      RDKit::MolOps::sanitizeMol(temp_mol, failedOp,
-                                 RDKit::MolOps::SANITIZE_PROPERTIES);
+      //   RDKit::MolOps::sanitizeMol(temp_mol, failedOp,
+      //                              RDKit::MolOps::SANITIZE_PROPERTIES);
+      temp_mol.updatePropertyCache(false);
     } catch (...) {
       if (debug_level_to_int(debug_level) >=
-          debug_level_to_int(DebugLevel::Trace)) {
+          debug_level_to_int(DebugLevel::Verbose)) {
         std::cerr << "Sanitization failed for candidate: Z=" << at.atomic_number
-                  << " H=" << h_count << " q=" << charge
+                  << " " << failedOp << " H=" << h_count << " q=" << charge
                   << " s=" << single_bonds << " d=" << double_bonds
                   << " t=" << triple_bonds << " a=" << aromatic_bonds
                   << " arom=" << (arom ? 1 : 0) << std::endl;
@@ -902,6 +1034,14 @@ class AtomTyper::Impl {
     }
 
     if (temp_mol.getAtomWithIdx(aidx)->getTotalNumHs() != h_count) {
+      // if (debug_level_to_int(debug_level) >=
+      //     debug_level_to_int(DebugLevel::Verbose)) {
+      //   std::cerr << "[is_valence_consistent] H count mismatch for "
+      //             << RDKit::MolToSmiles(temp_mol) << ": expected " << h_count
+      //             << ", got " <<
+      //             temp_mol.getAtomWithIdx(aidx)->getTotalNumHs()
+      //             << std::endl;
+      // }
       return false;
     }
 
@@ -909,11 +1049,11 @@ class AtomTyper::Impl {
             debug_level_to_int(DebugLevel::Verbose) &&
         !temp_mol.getAtomWithIdx(aidx)->hasValenceViolation()) {
       int deg = single_bonds + double_bonds + triple_bonds + aromatic_bonds;
-      std::cerr << RDKit::MolToSmiles(temp_mol) << " " << h_count << " "
-                << charge << " " << single_bonds << " " << double_bonds << " "
-                << triple_bonds << " " << aromatic_bonds << " "
-                << temp_mol.getAtomWithIdx(0)->getNumRadicalElectrons() << " "
-                << deg << std::endl;
+      std::cerr << "[is_valence_consistent] " << RDKit::MolToSmiles(temp_mol)
+                << " " << h_count << " " << charge << " " << single_bonds << " "
+                << double_bonds << " " << triple_bonds << " " << aromatic_bonds
+                << " " << temp_mol.getAtomWithIdx(0)->getNumRadicalElectrons()
+                << " " << deg << std::endl;
     }
 
     return !temp_mol.getAtomWithIdx(aidx)->hasValenceViolation();
@@ -938,6 +1078,75 @@ class AtomTyper::Impl {
       int aromatic_bonds;
       int arom;
     };
+
+    if (settings.debug_level == DebugLevel::Verbose) {
+      std::cerr << "Enumerating alternatives for atom index "
+                << at.atom.atom_idx
+                << " with SMARTS pattern: " << at.atom.source_atom_smarts
+                << " extracted: " << "explicit_charge: "
+                << (at.atom.explicit_charge.has_value()
+                        ? std::to_string(*at.atom.explicit_charge)
+                        : "None")
+                << "\n explicit_H: "
+                << (at.atom.explicit_H.has_value()
+                        ? std::to_string(*at.atom.explicit_H)
+                        : "None")
+                << "\n explicit_valence: "
+                << (at.atom.explicit_valence.has_value()
+                        ? std::to_string(*at.atom.explicit_valence)
+                        : "None")
+                << "\n explicit_lower_h: "
+                << (at.atom.explicit_lower_h.has_value()
+                        ? std::to_string(*at.atom.explicit_lower_h)
+                        : "None")
+                << "\n explicit_D: "
+                << (at.atom.explicit_D.has_value()
+                        ? std::to_string(*at.atom.explicit_D)
+                        : "None")
+                << "\n explicit_X: "
+                << (at.atom.explicit_X.has_value()
+                        ? std::to_string(*at.atom.explicit_X)
+                        : "None")
+                << "\n explicit_aromatic: "
+                << (at.atom.explicit_aromatic.has_value()
+                        ? std::to_string(*at.atom.explicit_aromatic)
+                        : "None")
+                << "\n explicit_aliphatic: "
+                << (at.atom.explicit_aliphatic.has_value()
+                        ? std::to_string(*at.atom.explicit_aliphatic)
+                        : "None")
+                << "\n is_aromatic: "
+                << (at.atom.is_aromatic ? "true" : "false")
+                << "\n is_aliphatic: "
+                << (at.atom.is_aliphatic ? "true" : "false")
+                << "\n explicit_in_ring: "
+                << (at.atom.explicit_in_ring.has_value()
+                        ? std::to_string(*at.atom.explicit_in_ring)
+                        : "None")
+                << " explicit_ring_count: "
+                << (at.atom.explicit_ring_count.has_value()
+                        ? std::to_string(*at.atom.explicit_ring_count)
+                        : "None")
+                << " explicit_min_ring_size: "
+                << (at.atom.explicit_min_ring_size.has_value()
+                        ? std::to_string(*at.atom.explicit_min_ring_size)
+                        : "None")
+                << "\n excluded_charges: "
+                << (at.atom.excluded_charges.empty() ? "None" : "")
+                << "\n excluded_h_counts: "
+                << (at.atom.excluded_h_counts.empty() ? "None" : "")
+                << "\n excluded_D_values: "
+                << (at.atom.excluded_D_values.empty() ? "None" : "")
+                << "\n excluded_X_values: "
+                << (at.atom.excluded_X_values.empty() ? "None" : "")
+                << "\n excluded_aromatic: "
+                << (at.atom.excluded_aromatic ? "true" : "false")
+                << "\n max_valence: " << at.atom.max_valence << std::endl
+                << "bond_types:" << std::endl;
+      for (const auto &bt : at.atom.bond_types) {
+        std::cerr << "  " << bt.first << ": " << bt.second << std::endl;
+      }
+    }
 
     std::vector<int> hs;
     if (at.atom.explicit_H.has_value()) {
@@ -977,11 +1186,16 @@ class AtomTyper::Impl {
                        }),
         charges.end());
 
+    int lower_h_count = 0;
+    if (at.atom.explicit_lower_h.has_value()) {
+      lower_h_count = *at.atom.explicit_lower_h;
+    }
+
     std::vector<int> degree_values;
     if (at.atom.explicit_D.has_value()) {
-      degree_values.push_back(*at.atom.explicit_D);
+      degree_values.push_back(std::max(*at.atom.explicit_D, lower_h_count));
     } else {
-      for (int d = at.atom.min_bonds; d <= 5; ++d) {
+      for (int d = at.atom.min_bonds + lower_h_count; d <= 5; ++d) {
         degree_values.push_back(d);
       }
     }
@@ -998,7 +1212,7 @@ class AtomTyper::Impl {
         degree_values.end());
 
     std::vector<int> single_bond_values;
-    for (int d = at.atom.num_single_bonds; d <= 4; ++d) {
+    for (int d = at.atom.num_single_bonds; d <= 4 - lower_h_count; ++d) {
       single_bond_values.push_back(d);
     }
 
@@ -1013,10 +1227,11 @@ class AtomTyper::Impl {
     }
     std::vector<int> aromatic_bond_values;
     std::vector<int> arom;
+    // arom.push_back(false);
     if (at.atom.is_aromatic) {
-      if (!at.atom.excluded_aromatic) {
-        arom.push_back(true);
-      }
+      // if (!at.atom.excluded_aromatic) {
+      // }
+      arom.push_back(1);
       // Aromatic atoms in valid aromatic systems have at least two aromatic
       // neighbors. Without this floor, cases like "cC" can incorrectly emit
       // a D1 aromatic branch alongside D3.
@@ -1027,10 +1242,9 @@ class AtomTyper::Impl {
     } else {
       aromatic_bond_values.push_back(0);
     }
+
     if (at.atom.is_aliphatic) {
-      if (!at.atom.excluded_aliphatic) {
-        arom.push_back(false);
-      }
+      arom.push_back(0);
     }
 
     // std::cerr << arom.size() << std::endl;
@@ -1041,6 +1255,25 @@ class AtomTyper::Impl {
     std::vector<Candidate> candidates;
     std::set<std::tuple<int, int, int, int, int, int, int, bool>>
         seen_candidates;
+    if (settings.debug_level == DebugLevel::Verbose) {
+      std::cerr << "Candidate generation ranges:" << std::endl;
+      std::cerr << "  H: " << hs.front() << " to " << hs.back() << std::endl;
+      std::cerr << "  Charge: " << charges.front() << " to " << charges.back()
+                << std::endl;
+      std::cerr << "  Degree: " << degree_values.front() << " to "
+                << degree_values.back() << std::endl;
+      std::cerr << "  Single bonds: " << single_bond_values.front() << " to "
+                << single_bond_values.back() << std::endl;
+      std::cerr << "  Double bonds: " << double_bond_values.front() << " to "
+                << double_bond_values.back() << std::endl;
+      std::cerr << "  Triple bonds: " << triple_bond_values.front() << " to "
+                << triple_bond_values.back() << std::endl;
+      std::cerr << "  Aromatic bonds: " << aromatic_bond_values.front()
+                << " to " << aromatic_bond_values.back() << std::endl;
+      // std::cerr << " aromatic flag: " << arom.front() << " to " <<
+      // arom.back()
+      //           << std::endl;
+    }
     candidates.reserve(64);
     for (int h_count : hs) {
       for (int charge : charges) {
@@ -1048,18 +1281,69 @@ class AtomTyper::Impl {
           for (int double_bonds : double_bond_values) {
             for (int triple_bonds : triple_bond_values) {
               for (int aromatic_bonds : aromatic_bond_values) {
-                for (bool aromflag : arom) {
+                for (int aromflag : arom) {
+                  // if (settings.debug_level == DebugLevel::Verbose) {
+                  // std::cerr
+                  //     << "Testing candidate: "
+                  //     << " Z=" << at.atom.atomic_number << "H=" << h_count
+                  //     << " Charge=" << charge << " Single=" << single_bonds
+                  //     << " Double=" << double_bonds
+                  //     << " Triple=" << triple_bonds
+                  //     << " Aromatic=" << aromatic_bonds << " Arom=" <<
+                  //     aromflag
+                  //     << std::endl;
+                  // }
                   if (!aromflag) {
                     aromatic_bonds = 0;
                   }
+                  const int degree = single_bonds + double_bonds +
+                                     triple_bonds + aromatic_bonds +
+                                     lower_h_count;
+
+                  int lower_h = 0;
+                  if (at.atom.explicit_lower_h.has_value()) {
+                    lower_h = *at.atom.explicit_lower_h;
+                  }
+                  if (at.atom.explicit_X.has_value() &&
+                      (degree + h_count) != *at.atom.explicit_X) {
+                    // if (settings.debug_level == DebugLevel::Verbose) {
+                    //   std::cerr << "  Skipping due to explicit X constraint:
+                    //   "
+                    //             << *at.atom.explicit_X << std::endl;
+                    // }
+                    continue;
+                  }
+
+                  if (at.atom.explicit_valence.has_value()) {
+                    int valence_from_bonds = single_bonds + 2 * double_bonds +
+                                             3 * triple_bonds + aromatic_bonds +
+                                             lower_h_count + h_count;
+                    if (valence_from_bonds != *at.atom.explicit_valence) {
+                      if (settings.debug_level == DebugLevel::Verbose) {
+                        std::cerr
+                            << "  Skipping due to explicit valence constraint: "
+                            << *at.atom.explicit_valence << std::endl;
+                      }
+                      continue;
+                    }
+                  }
+
                   if (!is_valence_consistent(at.atom, h_count, charge,
                                              single_bonds, double_bonds,
                                              triple_bonds, aromatic_bonds,
                                              aromflag, settings.debug_level)) {
                     continue;
                   }
-                  int degree = single_bonds + double_bonds + triple_bonds +
-                               aromatic_bonds;
+                  const int serialized_degree = degree;
+                  if (!degree_values.empty() &&
+                      std::find(degree_values.begin(), degree_values.end(),
+                                serialized_degree) == degree_values.end()) {
+                    if (settings.debug_level == DebugLevel::Verbose) {
+                      std::cerr << "  Skipping due to degree constraint: "
+                                << serialized_degree << std::endl;
+                    }
+                    continue;
+                  }
                   auto key = std::make_tuple(
                       degree, h_count, charge, single_bonds, double_bonds,
                       triple_bonds, aromatic_bonds, aromflag ? 1 : 0);
@@ -1075,7 +1359,43 @@ class AtomTyper::Impl {
         }
       }
     }
+    if (settings.debug_level == DebugLevel::Verbose) {
+      std::cerr << "Generated " << candidates.size()
+                << " candidates before sorting." << std::endl;
+    }
+    if (candidates.empty()) {
+      // if (settings.debug_level == DebugLevel::Verbose) {
+      std::stringstream err;
+      err << "No valid DoF atom alternatives could be generated for atom_idx="
+          << at.atom.atom_idx << " (atomic_number=" << at.atom.atomic_number
+          << ", formal_charge=" << at.atom.formal_charge
+          << ", num_single_bonds=" << at.atom.num_single_bonds
+          << ", num_double_bonds=" << at.atom.num_double_bonds
+          << ", num_triple_bonds=" << at.atom.num_triple_bonds
+          << ", num_aromatic_bonds=" << at.atom.num_aromatic_bonds
+          << ", explicit_H=";
 
+      if (at.atom.explicit_H.has_value()) {
+        err << *at.atom.explicit_H;
+      } else {
+        err << "None";
+      }
+      err << ", explicit_charge=";
+      if (at.atom.explicit_charge.has_value()) {
+        err << *at.atom.explicit_charge;
+      } else {
+        err << "None";
+      }
+      err << ", aromatic=" << (at.atom.is_aromatic ? "true" : "false")
+          << ", aliphatic=" << (at.atom.is_aliphatic ? "true" : "false")
+          << ", source_atom_smarts='" << at.atom.source_atom_smarts
+          << " source_smarts='" << at.atom.smarts_pattern
+          << "'). Consider relaxing SMARTS constraints or enumeration bounds.";
+      throw std::runtime_error(err.str());
+      //   std::cerr << err.str() << std::endl;
+      //   return at.atom.source_atom_smarts;
+      // }
+    }
     const auto charge_sort_key = [](int charge) {
       if (charge >= 0) {
         return std::string("+") + std::to_string(charge);
@@ -1108,48 +1428,14 @@ class AtomTyper::Impl {
                 }
                 return charge_sort_key(a.charge) < charge_sort_key(b.charge);
               });
-    // for (const auto &c : candidates) {
-    //   std::cerr << "Candidate: D=" << c.degree << " H=" << c.h_count
-    //             << " Charge=" << c.charge << " Single=" << c.single_bonds
-    //             << " Double=" << c.double_bonds << " Triple=" <<
-    //             c.triple_bonds
-    //             << " Aromatic=" << c.aromatic_bonds << " Arom=" << c.arom
-    //             << std::endl;
-    // }
-    if (candidates.empty()) {
-      //   if (settings.debug_level == DebugLevel::Verbose) {
-      std::stringstream err;
-      err << "No valid DoF atom alternatives could be generated for atom_idx="
-          << at.atom.atom_idx << " (atomic_number=" << at.atom.atomic_number
-          << ", formal_charge=" << at.atom.formal_charge
-          << ", num_single_bonds=" << at.atom.num_single_bonds
-          << ", num_double_bonds=" << at.atom.num_double_bonds
-          << ", num_triple_bonds=" << at.atom.num_triple_bonds
-          << ", num_aromatic_bonds=" << at.atom.num_aromatic_bonds
-          << ", explicit_H=";
 
-      if (at.atom.explicit_H.has_value()) {
-        err << *at.atom.explicit_H;
-      } else {
-        err << "None";
-      }
-      err << ", explicit_charge=";
-      if (at.atom.explicit_charge.has_value()) {
-        err << *at.atom.explicit_charge;
-      } else {
-        err << "None";
-      }
-      err << ", aromatic=" << (at.atom.is_aromatic ? "true" : "false")
-          << ", aliphatic=" << (at.atom.is_aliphatic ? "true" : "false")
-          << ", source_smarts='" << at.atom.smarts_pattern
-          << "'). Consider relaxing SMARTS constraints or enumeration bounds.";
-      throw std::runtime_error(err.str());
-      //   }
-    }
-
+    const auto serialized_degree_value = [&](const Candidate &c) {
+      return c.degree;
+    };
     const auto all_same_degree = std::all_of(
         candidates.begin(), candidates.end(), [&](const Candidate &c) {
-          return c.degree == candidates.front().degree;
+          return serialized_degree_value(c) ==
+                 serialized_degree_value(candidates.front());
         });
     const auto all_same_h = std::all_of(
         candidates.begin(), candidates.end(), [&](const Candidate &c) {
@@ -1158,6 +1444,13 @@ class AtomTyper::Impl {
     const auto all_same_charge = std::all_of(
         candidates.begin(), candidates.end(), [&](const Candidate &c) {
           return c.charge == candidates.front().charge;
+        });
+    const auto candidate_x_value = [](const Candidate &c) {
+      return c.degree + c.h_count;
+    };
+    const auto all_same_x = std::all_of(
+        candidates.begin(), candidates.end(), [&](const Candidate &c) {
+          return candidate_x_value(c) == candidate_x_value(candidates.front());
         });
     const auto all_same_arom = std::all_of(
         candidates.begin(), candidates.end(),
@@ -1180,10 +1473,25 @@ class AtomTyper::Impl {
           return c.aromatic_bonds == candidates.front().aromatic_bonds;
         });
 
+    const bool include_degree_terms = true;
+    const bool include_x_terms = settings.include_x_in_reserialization;
+    const bool include_h_terms = true;
+    const bool include_charge_terms = true;
+    // const bool include_arom_terms = at.atom.explicit_aromatic.has_value() ||
+    //                                 at.atom.explicit_aliphatic.has_value() ||
+    //                                 at.atom.excluded_aromatic ||
+    //                                 at.atom.excluded_aliphatic;
+    const bool include_arom_terms = true;
+    const bool no_varying_primitive_terms =
+        (!include_degree_terms || all_same_degree) &&
+        (!include_x_terms || all_same_x) && (!include_h_terms || all_same_h) &&
+        (!include_charge_terms || all_same_charge) &&
+        (!include_arom_terms || all_same_arom);
+
     const bool no_varying_terms =
-        all_same_degree && all_same_h && all_same_charge && all_same_arom &&
-        all_same_single_bonds && all_same_double_bonds &&
-        all_same_triple_bonds && all_same_aromatic_bonds;
+        no_varying_primitive_terms && all_same_single_bonds &&
+        all_same_double_bonds && all_same_triple_bonds &&
+        all_same_aromatic_bonds;
     const bool no_varying_bonds =
         all_same_single_bonds && all_same_double_bonds &&
         all_same_triple_bonds && all_same_aromatic_bonds;
@@ -1209,21 +1517,37 @@ class AtomTyper::Impl {
           emit(":", "a", add_aromatic);
         };
 
-    // const auto symbols = atom_symbol_for_smarts(at.atom);
-    out << "[" << "#" << std::to_string(at.atom.atomic_number);
+    const auto ring_constraint_token = [&]() -> std::string {
+      if (at.atom.explicit_in_ring.has_value() &&
+          !(*at.atom.explicit_in_ring)) {
+        return "!R";
+      }
+      if (at.atom.explicit_ring_count.has_value() &&
+          *at.atom.explicit_ring_count >= 0) {
+        return "R" + std::to_string(*at.atom.explicit_ring_count);
+      }
+      if (at.atom.explicit_min_ring_size.has_value() &&
+          *at.atom.explicit_min_ring_size > 0) {
+        return "R" + std::to_string(*at.atom.explicit_min_ring_size);
+      }
+      if (at.atom.explicit_in_ring.has_value() && *at.atom.explicit_in_ring) {
+        return "R";
+      }
+      return "";
+    }();
 
-    // for (size_t i = 0; i < symbols.size(); ++i) {
-    //   out << symbols[i];
-    //   if (i + 1 < symbols.size()) {
-    //     out << ",";
-    //   }
-    // }
+    out << "[" << "#" << std::to_string(at.atom.atomic_number);
+    if (!ring_constraint_token.empty()) {
+      out << ";" << ring_constraint_token;
+    }
 
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << ";#alt=" << candidates.size() << std::endl;
+      std::cerr << "[enumerate_atom_alternatives] ;#alt=" << candidates.size()
+                << std::endl;
       for (const auto &c : candidates) {
-        std::cerr << "Candidate: D=" << c.degree << " H=" << c.h_count
-                  << " Charge=" << c.charge << " Single=" << c.single_bonds
+        std::cerr << "[enumerate_atom_alternatives] Candidate: D=" << c.degree
+                  << " H=" << c.h_count << " Charge=" << c.charge
+                  << " Single=" << c.single_bonds
                   << " Double=" << c.double_bonds
                   << " Triple=" << c.triple_bonds
                   << " Aromatic=" << c.aromatic_bonds << " Arom=" << c.arom
@@ -1231,17 +1555,24 @@ class AtomTyper::Impl {
       }
     }
 
-    if (all_same_h) {
+    if (include_h_terms && all_same_h) {
       out << ";H" << candidates.front().h_count;
     }
-    if (all_same_degree) {
-      out << ";D" << candidates.front().degree;
+    if (include_degree_terms && all_same_degree) {
+      out << ";D" << serialized_degree_value(candidates.front());
     }
-    if (all_same_charge) {
+    if (include_x_terms && all_same_x) {
+      out << ";X" << candidate_x_value(candidates.front());
+    }
+    if (include_charge_terms && all_same_charge) {
       out << ";" << charge_token(candidates.front().charge);
     }
 
-    if (all_same_arom) {
+    if (lower_h_count > 0) {
+      out << ";h" << lower_h_count;
+    }
+
+    if (include_arom_terms && all_same_arom) {
       if (candidates.front().arom) {
         out << ";a";
       } else {
@@ -1268,8 +1599,8 @@ class AtomTyper::Impl {
     }
 
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << "join flags " << no_varying_bonds << " " << no_varying_terms
-                << " "
+      std::cerr << "[enumerate_atom_alternatives] join flags "
+                << no_varying_bonds << " " << no_varying_terms << " "
                 << " " << all_same_aromatic_bonds << " "
                 << all_same_single_bonds << " " << all_same_double_bonds << " "
                 << all_same_triple_bonds << std::endl;
@@ -1285,18 +1616,25 @@ class AtomTyper::Impl {
 
     for (size_t i = 0; i < candidates.size(); ++i) {
       bool wrote_any = false;
-      if (!all_same_degree) {
-        out << "D" << candidates[i].degree;
+      if (include_degree_terms && !all_same_degree) {
+        out << "D" << serialized_degree_value(candidates[i]);
         wrote_any = true;
       }
-      if (!all_same_h) {
+      if (include_x_terms && !all_same_x) {
+        if (wrote_any) {
+          out << "&";
+        }
+        out << "X" << candidate_x_value(candidates[i]);
+        wrote_any = true;
+      }
+      if (include_h_terms && !all_same_h) {
         if (wrote_any) {
           out << "&";
         }
         out << "H" << candidates[i].h_count;
         wrote_any = true;
       }
-      if (!all_same_charge) {
+      if (include_charge_terms && !all_same_charge) {
         if (wrote_any) {
           out << "&";
         }
@@ -1304,7 +1642,7 @@ class AtomTyper::Impl {
         wrote_any = true;
       }
 
-      if (!all_same_arom) {
+      if (include_arom_terms && !all_same_arom) {
         if (wrote_any) {
           out << "&";
         }
@@ -1335,16 +1673,20 @@ class AtomTyper::Impl {
         // max_amap = next_atom_map_idx_hold;
       }
       if (!wrote_any) {
-        std::cerr
-            << "Warning: candidate " << i
-            << " has no varying terms but was not caught by all_same checks."
-            << std::endl;
+        if (settings.debug_level == DebugLevel::Trace) {
+          std::cerr
+              << "Warning: candidate " << i
+              << " has no varying terms but was not caught by all_same checks."
+              << std::endl;
+        }
         // out << "D" << candidates[i].degree << "&H" << candidates[i].h_count
         //     << "&" << charge_token(candidates[i].charge);
       }
 
       if (i + 1 < candidates.size()) {
-        out << ",";
+        if (wrote_any) {
+          out << ",";
+        }
       }
     }
     out << "]";
@@ -1386,8 +1728,8 @@ AtomTyper::AtomTyper() : pimpl(std::make_unique<Impl>()) {}
 
 AtomTyper::~AtomTyper() = default;
 
-std::vector<AtomType> AtomTyper::type_atoms_from_smiles(
-    const std::string &smiles) {
+std::vector<PatternItem> AtomTyper::type_atoms_from_smiles(
+  const std::string &smiles) {
   if (smiles.empty()) {
     throw std::runtime_error("Empty SMILES string");
   }
@@ -1405,78 +1747,99 @@ std::vector<AtomType> AtomTyper::type_atoms_from_smiles(
     mol.reset(RDKit::SmilesToMol(canonical));
   }
 
-  // Process molecule and extract atom types
+  // Process molecule and extract atom/bond pattern items
   auto atom_types = pimpl->process_molecule(mol.get(), false);
+  std::vector<PatternItem> items;
+  if (atom_types.empty()) {
+    return items;
+  }
 
-  return atom_types;
+  items.reserve(atom_types.size() * 2 - 1);
+  for (size_t i = 0; i < atom_types.size(); ++i) {
+    PatternItem atom_item;
+    atom_item.kind = PatternItemKind::Atom;
+    atom_item.atom = atom_types[i];
+    items.push_back(atom_item);
+
+    if (i + 1 < atom_types.size()) {
+      if (auto *bond = mol->getBondBetweenAtoms(static_cast<unsigned int>(i),
+                                                static_cast<unsigned int>(i + 1))) {
+        PatternItem bond_item;
+        bond_item.kind = PatternItemKind::Bond;
+        bond_item.bond = pimpl->make_bond_type(bond);
+        items.push_back(bond_item);
+      }
+    }
+  }
+
+  return items;
 }
 
-std::vector<AtomType> AtomTyper::type_atoms_from_smarts(
-    const std::string &smarts) {
+// std::vector<AtomType> AtomTyper::type_atoms_from_smarts(
+//     const std::string &smarts) {
+//   if (smarts.empty()) {
+//     throw std::runtime_error("Empty SMARTS string");
+//   }
+
+//   // Parse SMARTS
+//   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
+//   if (!mol) {
+//     throw std::runtime_error("Failed to parse SMARTS: " + smarts);
+//   }
+
+//   // Update property cache and find rings for SMARTS molecules
+//   mol->updatePropertyCache();
+//   RDKit::MolOps::findSSSR(*mol);
+
+//   return pimpl->process_molecule(mol.get(), true);
+// }
+
+std::string AtomTyper::type_atoms_from_smarts(const std::string &smarts) {
+  int max_amap = 0;
+  return type_atoms_from_smarts(smarts, false, max_amap, false, false);
+}
+
+std::string AtomTyper::type_atoms_from_smarts(const std::string &smarts,
+                                              DebugLevel debug_level) {
+  int max_amap = 0;
+  const bool verbose = debug_level != DebugLevel::Off;
+  return type_atoms_from_smarts(smarts, 0, 4, -1, 1, verbose, debug_level,
+                                false, max_amap, false);
+}
+
+std::string AtomTyper::type_atoms_from_smarts(
+    const std::string &smarts, bool map_new_atoms, int &max_amap, bool verbose,
+    bool include_x_in_reserialization) {
+  return type_atoms_from_smarts(smarts, 0, 4, -1, 1, verbose,
+                                pimpl->default_debug_level, map_new_atoms,
+                                max_amap, include_x_in_reserialization);
+}
+
+std::string AtomTyper::type_atoms_from_smarts(
+    const std::string &smarts, int h_min, int h_max, int charge_min,
+    int charge_max, bool map_new_atoms, int &max_amap,
+    bool include_x_in_reserialization) {
+  return type_atoms_from_smarts(smarts, h_min, h_max, charge_min, charge_max,
+                                false, pimpl->default_debug_level,
+                                map_new_atoms, max_amap,
+                                include_x_in_reserialization);
+}
+
+std::string AtomTyper::type_atoms_from_smarts(
+    const std::string &smarts, int h_min, int h_max, int charge_min,
+    int charge_max, bool verbose, DebugLevel debug_level, bool map_new_atoms,
+    int &max_amap, bool include_x_in_reserialization) {
+  ZoneScopedN("AtomTyper::enumerate_dof_smarts");
   if (smarts.empty()) {
+    std::cerr << "[type_atoms_from_smarts] Error: Empty SMARTS string provided."
+              << std::endl;
     throw std::runtime_error("Empty SMARTS string");
   }
 
-  // Parse SMARTS
   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
   if (!mol) {
-    throw std::runtime_error("Failed to parse SMARTS: " + smarts);
-  }
-
-  // Update property cache and find rings for SMARTS molecules
-  mol->updatePropertyCache();
-  RDKit::MolOps::findSSSR(*mol);
-
-  return pimpl->process_molecule(mol.get(), true);
-}
-
-// std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts) {
-//   return enumerate_dof_smarts(smarts, 0, 4, -1, 1, false,
-//                               pimpl->default_debug_level);
-// }
-
-// std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
-//                                             bool map_new_atoms) {
-//   return enumerate_dof_smarts(smarts, 0, 4, -1, 1, false,
-//                               pimpl->default_debug_level, map_new_atoms);
-// }
-
-std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
-                                            bool map_new_atoms, int &max_amap,
-                                            bool verbose) {
-  return enumerate_dof_smarts(smarts, 0, 4, -1, 1, verbose,
-                              pimpl->default_debug_level, map_new_atoms,
-                              max_amap);
-}
-
-// std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
-//                                             DebugLevel debug_level, int
-//                                             &max_amap) {
-//   return enumerate_dof_smarts(smarts, 0, 4, -1, 1, false, debug_level, false,
-//   max_amap);
-// }
-
-std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
-                                            int h_min, int h_max,
-                                            int charge_min, int charge_max,
-                                            bool map_new_atoms, int &max_amap) {
-  return enumerate_dof_smarts(smarts, h_min, h_max, charge_min, charge_max,
-                              false, pimpl->default_debug_level, map_new_atoms,
-                              max_amap);
-}
-
-std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
-                                            int h_min, int h_max,
-                                            int charge_min, int charge_max,
-                                            bool verbose,
-                                            DebugLevel debug_level,
-                                            bool map_new_atoms, int &max_amap) {
-  if (smarts.empty()) {
-    throw std::runtime_error("Empty SMARTS string");
-  }
-
-  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
-  if (!mol) {
+    std::cerr << "[type_atoms_from_smarts] Failed to parse SMARTS: " << smarts
+              << std::endl;
     throw std::runtime_error("Failed to parse SMARTS: " + smarts);
   }
 
@@ -1489,9 +1852,13 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
   settings.charge_min = std::min(charge_min, charge_max);
   settings.charge_max = std::max(charge_min, charge_max);
   settings.debug_level = verbose ? debug_level : DebugLevel::Off;
+  settings.include_x_in_reserialization = include_x_in_reserialization;
 
   if (debug_level == DebugLevel::Verbose) {
     verbose = true;
+    settings.debug_level = DebugLevel::Verbose;
+  }
+  if (verbose) {
     settings.debug_level = DebugLevel::Verbose;
   }
 
@@ -1501,19 +1868,17 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
   query_mol_owners.reserve(rewritten.getNumAtoms());
 
   if (verbose) {
-    std::cerr << "Original SMARTS: " << smarts << std::endl;
+    std::cerr << "[type_atoms_from_smarts] Original SMARTS: " << smarts
+              << std::endl;
     for (size_t i = 0; i < atom_types.size(); ++i) {
       const auto &at = atom_types[i];
-      if (verbose) {
-        std::cerr << "Atom idx " << i << ": Z=" << at.atomic_number
-                  << " H=" << at.num_hydrogens << " q=" << at.formal_charge
-                  << " s=" << at.num_single_bonds
-                  << " d=" << at.num_double_bonds
-                  << " t=" << at.num_triple_bonds
-                  << " a=" << at.num_aromatic_bonds
-                  << " arom=" << (at.is_aromatic ? 1 : 0)
-                  << " alip=" << (at.is_aliphatic ? 1 : 0) << std::endl;
-      }
+      std::cerr << "[type_atoms_from_smarts] Atom idx " << i
+                << ": Z=" << at.atomic_number << " H=" << at.num_hydrogens
+                << " q=" << at.formal_charge << " s=" << at.num_single_bonds
+                << " d=" << at.num_double_bonds << " t=" << at.num_triple_bonds
+                << " a=" << at.num_aromatic_bonds
+                << " arom=" << (at.is_aromatic ? 1 : 0)
+                << " alip=" << (at.is_aliphatic ? 1 : 0) << std::endl;
     }
   }
 
@@ -1536,7 +1901,7 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
       token = token.substr(0, colon);
     }
 
-    if (token == "*" || token == "a") {
+    if (token == "*" || token == "a" || token == "A") {
       return true;
     }
 
@@ -1546,8 +1911,33 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
       });
     }
 
+    const auto is_letter = [](char c) {
+      return std::isalpha(static_cast<unsigned char>(c)) != 0;
+    };
+
+    if (std::all_of(token.begin(), token.end(), is_letter)) {
+      if (token.size() == 1) {
+        return true;
+      }
+      if (token.size() == 2) {
+        // Aliphatic element symbols like Cl, Br, Si ...
+        if (std::isupper(static_cast<unsigned char>(token[0])) &&
+            std::islower(static_cast<unsigned char>(token[1]))) {
+          return true;
+        }
+        // Aromatic two-letter symbols in SMARTS: as, se
+        if ((token == "as") || (token == "se")) {
+          return true;
+        }
+      }
+    }
+
     return false;
   };
+  if (verbose) {
+    std::cerr << "[type_atoms_from_smarts] before atom enumeration, SMARTS: "
+              << RDKit::MolToSmarts(rewritten) << std::endl;
+  }
 
   for (unsigned int i = 0; i < rewritten.getNumAtoms() && i < atom_types.size();
        ++i) {
@@ -1555,9 +1945,10 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
         RDKit::SmartsWrite::GetAtomSmarts(rewritten.getAtomWithIdx(i));
     if (is_single_primitive_atom_pattern(source_atom_smarts)) {
       if (verbose) {
-        std::cerr << "Skipping DoF enumeration for atom idx " << i
-                  << " (single primitive atom pattern): " << source_atom_smarts
-                  << std::endl;
+        std::cerr
+            << "[type_atoms_from_smarts] Skipping DoF enumeration for atom idx "
+            << i << " (single primitive atom pattern): " << source_atom_smarts
+            << std::endl;
       }
       continue;
     }
@@ -1566,18 +1957,38 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
     atom_item.kind = PatternItemKind::Atom;
     atom_item.atom = atom_types[i];
     std::string atom_smarts;
+    if (verbose) {
+      std::cerr
+          << "[type_atoms_from_smarts] Enumerating DoF alternatives for atom idx "
+          << i << ": " << source_atom_smarts << std::endl;
+    }
+
     try {
       atom_smarts = pimpl->enumerate_atom_alternatives(atom_item, settings,
                                                        map_new_atoms, max_amap);
+      if (verbose) {
+        //   std::cerr << i << ": " << std::endl;
+        std::cerr << "[type_atoms_from_smarts] Enumerated SMARTS for atom idx "
+                  << i << ": " << source_atom_smarts << " -> " << atom_smarts
+                  << std::endl;
+      }
     } catch (const std::exception &e) {
-      std::stringstream err;
-      err << "Failed to enumerate DoF alternatives for atom idx=" << i << ": "
-          << e.what();
-      throw std::runtime_error(err.str());
+      // debate whether to discard whole subpattern or just handle this
+      // subsubinstance
+      if (verbose) {
+        std::stringstream err;
+        err << "[type_atoms_from_smarts] Failed to enumerate DoF alternatives for atom idx="
+            << i << " " << source_atom_smarts << ":";
+        std::cerr << err.str() << " Error: " << e.what() << std::endl;
+      }
+      continue;
+      //   atom_smarts = source_atom_smarts;
+      //   throw std::runtime_error(err.str());
     }
     if (verbose) {
       //   std::cerr << i << ": " << std::endl;
-      std::cerr << "Enumerated SMARTS for atom idx " << i << ": " << atom_smarts
+      std::cerr << "[type_atoms_from_smarts] Enumerated SMARTS for atom idx "
+                << i << ": " << source_atom_smarts << " -> " << atom_smarts
                 << std::endl;
     }
     const bool parser_risky_atom_alt =
@@ -1586,7 +1997,7 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
         atom_smarts.find(',') != std::string::npos;
     if (parser_risky_atom_alt) {
       if (verbose) {
-        std::cerr << "Skipping atom idx " << i
+        std::cerr << "[type_atoms_from_smarts] Skipping atom idx " << i
                   << " due to parser-risky generated alternative (keeping "
                      "original query): "
                   << atom_smarts << std::endl;
@@ -1597,7 +2008,7 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
     std::unique_ptr<RDKit::ROMol> one_atom_mol(RDKit::SmartsToMol(atom_smarts));
     if (!one_atom_mol || one_atom_mol->getNumAtoms() != 1) {
       if (verbose) {
-        std::cerr << "Skipping atom idx " << i
+        std::cerr << "[type_atoms_from_smarts] Skipping atom idx " << i
                   << " because generated SMARTS could not be parsed as a "
                      "single atom query: "
                   << atom_smarts << std::endl;
@@ -1609,7 +2020,8 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
     auto *src_qatom = dynamic_cast<RDKit::QueryAtom *>(src_atom);
     if (!src_qatom || !src_qatom->getQuery()) {
       if (verbose) {
-        std::cerr << "Invalid query atom for idx " << i << std::endl;
+        std::cerr << "[type_atoms_from_smarts] Invalid query atom for idx " << i
+                  << std::endl;
       }
       continue;
     }
@@ -1619,8 +2031,9 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
       query_mol_owners.push_back(std::move(one_atom_mol));
     } catch (const std::exception &e) {
       if (verbose) {
-        std::cerr << "Error replacing atom query for idx " << i << ": "
-                  << e.what() << std::endl;
+        std::cerr
+            << "[type_atoms_from_smarts] Error replacing atom query for idx "
+            << i << ": " << e.what() << std::endl;
       }
     }
   }
@@ -1712,12 +2125,11 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
           std::to_string(bond->getIdx()));
     }
 
-    if (aliphatic_bond && begin_aromatic_only && end_aromatic_only) {
-      throw std::runtime_error(
-          "Discarded DoF variant: aliphatic bond cannot connect two aromatic "
-          "atoms at bond idx=" +
-          std::to_string(bond->getIdx()));
-    }
+    // if (aliphatic_bond && begin_aromatic_only && end_aromatic_only) {
+    //   throw std::runtime_error(
+    //       "Discarded DoF variant: aliphatic bond cannot connect two aromatic
+    //       " "atoms at bond idx=" + std::to_string(bond->getIdx()));
+    // }
   }
 
   try {
@@ -1727,16 +2139,10 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
         [](const std::string &s) -> bool {
       int bracket_depth = 0;
       int paren_depth = 0;
-      bool escape = false;
       for (const char ch : s) {
-        if (escape) {
-          escape = false;
-          continue;
-        }
-        if (ch == '\\') {
-          escape = true;
-          continue;
-        }
+        // In SMARTS, '\\' is a directional bond token (cis/trans), not a
+        // generic escape character. So we must still parse the following atom
+        // token normally (e.g. ...\\[C]).
         if (ch == '[') {
           ++bracket_depth;
         } else if (ch == ']') {
@@ -1765,9 +2171,9 @@ std::string AtomTyper::enumerate_dof_smarts(const std::string &smarts,
     return rewritten_smarts;
 
   } catch (const std::exception &e) {
-    std::cerr << "Error converting rewritten molecule to SMARTS: " << e.what()
-              << std::endl;
-    return smarts;  // Fallback to original SMARTS on error
+    throw std::runtime_error("Error converting rewritten molecule to SMARTS: " +
+                             std::string(e.what()));
+    // return smarts;  // Fallback to original SMARTS on error
   }
 }
 
@@ -1824,9 +2230,10 @@ std::map<std::string, double> AtomTyper::get_default_query_embedding() const {
 
 bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
                                         bool verbose) const {
+  ZoneScopedN("AtomTyper::is_valid_valence_smarts");
   const auto fail = [&](const std::string &reason) {
     if (verbose) {
-      std::cerr << "is_valid_valence_smarts: " << reason << " | smarts='"
+      std::cout << "is_valid_valence_smarts: " << reason << " | smarts='"
                 << smarts << "'" << std::endl;
     }
     return false;
@@ -1856,12 +2263,6 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
       return false;
     }
     const auto &at = atom_types[atom_idx];
-    if (at.explicit_aromatic.has_value()) {
-      return *at.explicit_aromatic;
-    }
-    if (at.explicit_aliphatic.has_value()) {
-      return !(*at.explicit_aliphatic);
-    }
     return at.is_aromatic;
   };
 
@@ -1870,12 +2271,6 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
       return false;
     }
     const auto &at = atom_types[atom_idx];
-    if (at.explicit_aliphatic.has_value()) {
-      return *at.explicit_aliphatic;
-    }
-    if (at.explicit_aromatic.has_value()) {
-      return !(*at.explicit_aromatic);
-    }
     return at.is_aliphatic;
   };
 
@@ -2028,10 +2423,23 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
     // least one atom-compatibility assignment to exist.
     if ((has_aromatic_arm || has_aliphatic_arm) &&
         !bond_has_compatible_assignment) {
-      return fail("bond compatibility failure at bond idx=" +
-                  std::to_string(bond->getIdx()) +
-                  " (begin_idx=" + std::to_string(begin_idx) +
-                  ", end_idx=" + std::to_string(end_idx) + ")");
+      return fail(
+          "bond compatibility failure at bond idx=" +
+          std::to_string(bond->getIdx()) +
+          " (begin_idx=" + std::to_string(begin_idx) + "\n" +
+          (has_aliphatic_arm ? "has aliphatic arm" : "no aliphatic arm") +
+          ", end_idx=" + std::to_string(end_idx) + "\n" +
+          (has_aromatic_arm ? "has aromatic arm" : "no aromatic arm") + "\n" +
+          (end_can_aliphatic ? "end can aliphatic" : "no end can aliphatic") +
+          "\n" +
+          (end_can_aromatic ? "end can aromatic" : "no end can aromatic") +
+          "\n" +
+          (begin_can_aliphatic ? "begin can aliphatic"
+                               : "no begin can aliphatic") +
+          "\n" +
+          (begin_can_aromatic ? "begin can aromatic"
+                              : "no begin can aromatic") +
+          "\n" + ") ");
     }
   }
 
@@ -2141,11 +2549,18 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
 
     bool any_valid = false;
 
-    // Bonds with unspecified order in SMARTS (implicit adjacency) may not be
-    // reflected in num_single/num_double/num_triple/num_aromatic counts, but
-    // they still contribute to degree constraints such as D/X.
-    const int known_degree = at.num_single_bonds + at.num_double_bonds +
-                             at.num_triple_bonds + at.num_aromatic_bonds;
+    // Bonds with unspecified/query order in SMARTS (including ':' aromatic
+    // query bonds in some parsed forms) may not be reflected in
+    // num_single/num_double/num_triple/num_aromatic counts, but they still
+    // contribute to topological degree constraints such as D/X.
+
+    int lower_h = at.explicit_lower_h.value_or(0);
+
+    const int known_bond_degree =
+        std::max(at.num_single_bonds + at.num_double_bonds +
+                     at.num_triple_bonds + at.num_aromatic_bonds,
+                 at.min_bonds);
+    const int known_degree = known_bond_degree + lower_h;
     const int target_degree =
         at.explicit_D.value_or(at.explicit_X.value_or(known_degree));
     const int missing_degree = std::max(0, target_degree - known_degree);
@@ -2158,10 +2573,14 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
     for (int h_count : h_candidates) {
       for (int charge : charge_candidates) {
         for (bool aromflag : aromatic_options) {
+          // if (verbose) {
+          //   std::cout << "Trying aromatic flag=" << aromflag << std::endl;
+          // }
+
           if (pimpl->is_valence_consistent(
                   at, h_count, charge, test_single_bonds, test_double_bonds,
                   test_triple_bonds, test_aromatic_bonds, aromflag,
-                  DebugLevel::Off)) {
+                  verbose ? DebugLevel::Verbose : DebugLevel::Off)) {
             any_valid = true;
             break;
           }
@@ -2354,8 +2773,8 @@ std::vector<std::string> AtomTyper::consolidate_smarts_by_atom_maps(
       std::string consolidated;
       size_t cursor = 0;
 
-      for (std::sregex_iterator it(g.template_smarts.begin(),
-                                   g.template_smarts.end(), atom_re),
+      for (std::sregex_iterator
+               it(g.template_smarts.begin(), g.template_smarts.end(), atom_re),
            end;
            it != end; ++it) {
         const auto &m = *it;
@@ -2379,7 +2798,8 @@ std::vector<std::string> AtomTyper::consolidate_smarts_by_atom_maps(
           continue;
         }
 
-        std::vector<std::string> alts(found->second.begin(), found->second.end());
+        std::vector<std::string> alts(found->second.begin(),
+                                      found->second.end());
         if (alts.size() == 1) {
           consolidated += "[" + alts.front() + ":" + std::to_string(amap) + "]";
           cursor = start + len;
@@ -2526,7 +2946,9 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
         continue;
       }
       const std::string atom_token = RDKit::SmartsWrite::GetAtomSmarts(atom);
-      const unsigned int amap = parse_map_from_inner(strip_brackets(atom_token));
+      // std::cout << "atom_token: " << atom_token << std::endl;
+      const unsigned int amap =
+          parse_map_from_inner(strip_brackets(atom_token));
       if (amap != 0U) {
         entry.map_to_atom_idx[amap] = atom->getIdx();
       }
@@ -2544,7 +2966,8 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
   // Use smallest mapped pattern as base scaffold.
   size_t base_idx = 0;
   for (size_t i = 1; i < parsed.size(); ++i) {
-    if (parsed[i].map_to_atom_idx.size() < parsed[base_idx].map_to_atom_idx.size()) {
+    if (parsed[i].map_to_atom_idx.size() <
+        parsed[base_idx].map_to_atom_idx.size()) {
       base_idx = i;
     }
   }
@@ -2569,7 +2992,8 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
   }
 
   std::function<std::string(const RDKit::ROMol &, unsigned int, int,
-                            std::set<unsigned int> &)> serialize_subtree;
+                            std::set<unsigned int> &)>
+      serialize_subtree;
   serialize_subtree = [&](const RDKit::ROMol &m, unsigned int root, int parent,
                           std::set<unsigned int> &path) -> std::string {
     if (root >= m.getNumAtoms()) {
@@ -2590,9 +3014,11 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
       if (!bond) {
         continue;
       }
-      const std::string child = serialize_subtree(m, nidx, static_cast<int>(root), path);
+      const std::string child =
+          serialize_subtree(m, nidx, static_cast<int>(root), path);
       if (!child.empty()) {
-        out += "(" + RDKit::SmartsWrite::GetBondSmarts(bond, root) + child + ")";
+        out +=
+            "(" + RDKit::SmartsWrite::GetBondSmarts(bond, root) + child + ")";
       }
     }
     path.erase(root);
@@ -2624,7 +3050,8 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
       path.insert(atom->getIdx());
       extras.push_back(RDKit::SmartsWrite::GetBondSmarts(bond, atom->getIdx()) +
                        serialize_subtree(*p.mol, nidx,
-                                         static_cast<int>(atom->getIdx()), path));
+                                         static_cast<int>(atom->getIdx()),
+                                         path));
     }
     std::sort(extras.begin(), extras.end());
     for (const auto &e : extras) {
@@ -2633,95 +3060,191 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
     return sig;
   };
 
-  unsigned int divergent_map = 0U;
+  std::vector<unsigned int> divergent_maps;
   for (const auto &amap : common_maps) {
     std::set<std::string> local;
     for (const auto &p : parsed) {
       local.insert(map_local_signature(p, amap));
     }
     if (local.size() > 1) {
-      divergent_map = amap;
-      break;
+      divergent_maps.push_back(amap);
     }
   }
 
-  if (divergent_map == 0U) {
+  if (divergent_maps.empty()) {
     return parsed[base_idx].smarts;
   }
 
-  std::set<std::string> recursive_options;
-  for (const auto &p : parsed) {
-    auto found = p.map_to_atom_idx.find(divergent_map);
-    if (found == p.map_to_atom_idx.end()) {
+  const auto canonicalize_without_atom_maps = [&](const std::string &smarts) {
+    const std::regex atom_re_local("\\[[^\\]]+\\]");
+    std::string out;
+    size_t cursor_local = 0;
+    for (std::sregex_iterator it(smarts.begin(), smarts.end(), atom_re_local),
+         end;
+         it != end; ++it) {
+      const auto &m = *it;
+      const size_t start = static_cast<size_t>(m.position());
+      const size_t len = static_cast<size_t>(m.length());
+      out += smarts.substr(cursor_local, start - cursor_local);
+
+      const std::string tok = m.str();
+      out += "[" + strip_map_suffix(tok) + "]";
+
+      cursor_local = start + len;
+    }
+    out += smarts.substr(cursor_local);
+    return out;
+  };
+
+  const auto atom_map_signature = [&](const std::string &smarts) {
+    const std::regex atom_re_local("\\[[^\\]]+\\]");
+    std::vector<unsigned int> sig;
+    for (std::sregex_iterator it(smarts.begin(), smarts.end(), atom_re_local),
+         end;
+         it != end; ++it) {
+      const std::string tok = it->str();
+      const unsigned int amap = parse_map_from_inner(strip_brackets(tok));
+      if (amap != 0U) {
+        sig.push_back(amap);
+      }
+    }
+    return sig;
+  };
+
+  std::map<unsigned int, std::string> replacements;
+  for (const auto divergent_map : divergent_maps) {
+    std::map<std::string, std::string> canonical_to_best_option;
+    std::map<std::string, std::vector<unsigned int>> canonical_to_best_sig;
+    for (const auto &p : parsed) {
+      auto found = p.map_to_atom_idx.find(divergent_map);
+      if (found == p.map_to_atom_idx.end()) {
+        continue;
+      }
+      const auto *atom = p.mol->getAtomWithIdx(found->second);
+      std::string local =
+          "[" + strip_map_suffix(RDKit::SmartsWrite::GetAtomSmarts(atom)) + "]";
+      // std::cout << "local: " << local << std::endl;
+      std::vector<std::string> extras;
+      for (const auto *nbr : p.mol->atomNeighbors(atom)) {
+        const unsigned int nidx = nbr->getIdx();
+        const unsigned int nbr_map = parse_map_from_inner(
+            strip_brackets(RDKit::SmartsWrite::GetAtomSmarts(nbr)));
+        if (nbr_map != 0U && common_maps.count(nbr_map)) {
+          continue;
+        }
+        auto *bond = p.mol->getBondBetweenAtoms(atom->getIdx(), nidx);
+        if (!bond) {
+          continue;
+        }
+        std::set<unsigned int> path;
+        path.insert(atom->getIdx());
+        extras.push_back(
+            "(" + RDKit::SmartsWrite::GetBondSmarts(bond, atom->getIdx()) +
+            serialize_subtree(*p.mol, nidx, static_cast<int>(atom->getIdx()),
+                              path) +
+            ")");
+      }
+      std::sort(extras.begin(), extras.end());
+      for (const auto &e : extras) {
+        local += e;
+      }
+
+      const std::string option = "$(" + local + ")";
+      // std::cout << "option: " << option << std::endl;
+      const std::string canonical = canonicalize_without_atom_maps(option);
+      const std::vector<unsigned int> sig = atom_map_signature(option);
+      // std::cout << "canonical: " << canonical << std::endl;
+      // std::cout << "sig: " << sig.size() << " elements" << std::endl;
+      // for (const auto &s : sig) {
+        // std::cout << "  " << s << std::endl;
+      // }
+
+      auto best_it = canonical_to_best_option.find(canonical);
+      if (best_it == canonical_to_best_option.end()) {
+        canonical_to_best_option[canonical] = option;
+        canonical_to_best_sig[canonical] = sig;
+        continue;
+      }
+
+      const auto &best_sig = canonical_to_best_sig[canonical];
+      if (sig < best_sig) {
+        canonical_to_best_option[canonical] = option;
+        canonical_to_best_sig[canonical] = sig;
+      }
+    }
+
+    if (canonical_to_best_option.empty()) {
+      // std::cout << "No options found for divergent map " << divergent_map
+                // << ", skipping consolidation for this map." << std::endl;
       continue;
     }
-    const auto *atom = p.mol->getAtomWithIdx(found->second);
-    std::string local = "[" + strip_map_suffix(RDKit::SmartsWrite::GetAtomSmarts(atom)) + "]";
 
-    std::vector<std::string> extras;
-    for (const auto *nbr : p.mol->atomNeighbors(atom)) {
-      const unsigned int nidx = nbr->getIdx();
-      const unsigned int nbr_map = parse_map_from_inner(
-          strip_brackets(RDKit::SmartsWrite::GetAtomSmarts(nbr)));
-      if (nbr_map != 0U && common_maps.count(nbr_map)) {
-        continue;
-      }
-      auto *bond = p.mol->getBondBetweenAtoms(atom->getIdx(), nidx);
-      if (!bond) {
-        continue;
-      }
-      std::set<unsigned int> path;
-      path.insert(atom->getIdx());
-      extras.push_back("(" + RDKit::SmartsWrite::GetBondSmarts(bond, atom->getIdx()) +
-                       serialize_subtree(*p.mol, nidx,
-                                         static_cast<int>(atom->getIdx()), path) +
-                       ")");
+    std::vector<std::string> recursive_options;
+    recursive_options.reserve(canonical_to_best_option.size());
+    for (const auto &kv : canonical_to_best_option) {
+      recursive_options.push_back(kv.second);
+      // std::cout << "recursive option for map " << divergent_map << ": "
+                // << kv.second << std::endl;
     }
-    std::sort(extras.begin(), extras.end());
-    for (const auto &e : extras) {
-      local += e;
-    }
+    std::sort(recursive_options.begin(), recursive_options.end());
 
-    recursive_options.insert("$(" + local + ")");
+    std::stringstream replacement_ss;
+    replacement_ss << "[";
+    bool first = true;
+    for (const auto &opt : recursive_options) {
+      if (!first) {
+        replacement_ss << ",";
+      }
+      replacement_ss << opt;
+      first = false;
+    }
+    replacement_ss << ":" << divergent_map << "]";
+    replacements[divergent_map] = replacement_ss.str();
   }
 
-  if (recursive_options.empty()) {
+  if (replacements.empty()) {
     return parsed[base_idx].smarts;
   }
 
-  std::stringstream replacement_ss;
-  replacement_ss << "[";
-  bool first = true;
-  for (const auto &opt : recursive_options) {
-    if (!first) {
-      replacement_ss << ",";
-    }
-    replacement_ss << opt;
-    first = false;
-  }
-  replacement_ss << ":" << divergent_map << "]";
-  const std::string replacement = replacement_ss.str();
-
-  const std::regex atom_re("\\[[^\\]]+\\]");
-  std::string consolidated;
-  size_t cursor = 0;
   const std::string &base_smarts = parsed[base_idx].smarts;
-  for (std::sregex_iterator it(base_smarts.begin(), base_smarts.end(), atom_re),
-       end;
-       it != end; ++it) {
-    const auto &m = *it;
-    const size_t start = static_cast<size_t>(m.position());
-    const size_t len = static_cast<size_t>(m.length());
-    consolidated += base_smarts.substr(cursor, start - cursor);
-
-    const std::string tok = m.str();
-    const unsigned int amap = parse_map_from_inner(strip_brackets(tok));
-    consolidated += (amap == divergent_map) ? replacement : tok;
-
-    cursor = start + len;
+  std::unique_ptr<RDKit::ROMol> base_mol(RDKit::SmartsToMol(base_smarts));
+  if (!base_mol) {
+    return parsed[base_idx].smarts;
   }
-  consolidated += base_smarts.substr(cursor);
 
+  RDKit::RWMol rewritten(*base_mol);
+  std::vector<std::unique_ptr<RDKit::ROMol>> replacement_owners;
+  replacement_owners.reserve(replacements.size());
+
+  for (unsigned int idx = 0; idx < rewritten.getNumAtoms(); ++idx) {
+    const auto *atom = rewritten.getAtomWithIdx(idx);
+    if (!atom) {
+      continue;
+    }
+
+    const std::string atom_token = RDKit::SmartsWrite::GetAtomSmarts(atom);
+    const unsigned int amap = parse_map_from_inner(strip_brackets(atom_token));
+    if (amap == 0U) {
+      continue;
+    }
+
+    const auto rep_it = replacements.find(amap);
+    if (rep_it == replacements.end()) {
+      continue;
+    }
+
+    std::unique_ptr<RDKit::ROMol> one_atom_mol(
+        RDKit::SmartsToMol(rep_it->second));
+    if (!one_atom_mol || one_atom_mol->getNumAtoms() != 1) {
+      continue;
+    }
+
+    auto *src_atom = one_atom_mol->getAtomWithIdx(0);
+    rewritten.replaceAtom(idx, src_atom, false, true);
+    replacement_owners.push_back(std::move(one_atom_mol));
+  }
+
+  std::string consolidated = RDKit::MolToSmarts(rewritten);
   std::unique_ptr<RDKit::ROMol> check(RDKit::SmartsToMol(consolidated));
   if (!check) {
     return parsed[base_idx].smarts;
@@ -2804,6 +3327,7 @@ std::string AtomTyper::get_atom_types_string(
        << optional_int_to_string(at.explicit_atomic_num)
        << ", explicit_charge=" << optional_int_to_string(at.explicit_charge)
        << ", explicit_H=" << optional_int_to_string(at.explicit_H)
+       << ", explicit_lower_h=" << optional_int_to_string(at.explicit_lower_h)
        << ", explicit_D=" << optional_int_to_string(at.explicit_D)
        << ", explicit_X=" << optional_int_to_string(at.explicit_X)
        << ", explicit_valence=" << optional_int_to_string(at.explicit_valence)
@@ -2882,6 +3406,7 @@ std::string AtomTyper::get_pattern_types_string(
          << optional_int_to_string(at.explicit_atomic_num)
          << ", explicit_charge=" << optional_int_to_string(at.explicit_charge)
          << ", explicit_H=" << optional_int_to_string(at.explicit_H)
+         << ", explicit_lower_h=" << optional_int_to_string(at.explicit_lower_h)
          << ", explicit_D=" << optional_int_to_string(at.explicit_D)
          << ", explicit_X=" << optional_int_to_string(at.explicit_X)
          << ", explicit_valence=" << optional_int_to_string(at.explicit_valence)

@@ -1,0 +1,109 @@
+name: wheels-rdkit-typer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "rdkit-typer-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up micromamba (macOS/Windows host deps)
+        id: micromamba
+        if: runner.os != 'Linux'
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: rdkit-wheel-deps
+          condarc: |
+            channels:
+              - conda-forge
+          create-args: >-
+            cmake
+            ninja
+            boost-cpp
+            libboost-python
+            libboost-python-devel
+            eigen
+            cairo
+            freetype
+            libpng
+            zlib
+            expat
+
+      - name: Print dependency prefix (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: |
+          echo "micromamba env path: ${{ steps.micromamba.outputs.environment-path }}"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_CONFIG_FILE: cibuildwheel.toml
+          CIBW_BEFORE_BUILD: >-
+            python -m pip install --upgrade pip setuptools wheel numpy
+          # Linux uses manylinux containers. Bootstrap native deps inside container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            set -euxo pipefail;
+            curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba;
+            ./bin/micromamba create -y -p /opt/rdkit-deps -c conda-forge
+            cmake ninja boost-cpp libboost-python libboost-python-devel eigen cairo freetype libpng zlib expat;
+            /opt/rdkit-deps/bin/cmake --version;
+            ls -la /opt/rdkit-deps/lib || true
+          CIBW_ENVIRONMENT_LINUX: >-
+            CMAKE_PREFIX_PATH=/opt/rdkit-deps
+            PKG_CONFIG_PATH=/opt/rdkit-deps/lib/pkgconfig
+            LD_LIBRARY_PATH=/opt/rdkit-deps/lib:$LD_LIBRARY_PATH
+          # macOS/Windows use the host-installed micromamba environment.
+          CIBW_ENVIRONMENT_MACOS: >-
+            CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }}
+            PKG_CONFIG_PATH=${{ steps.micromamba.outputs.environment-path }}/lib/pkgconfig
+            DYLD_FALLBACK_LIBRARY_PATH=${{ steps.micromamba.outputs.environment-path }}/lib
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            CMAKE_PREFIX_PATH=${{ steps.micromamba.outputs.environment-path }};${{ steps.micromamba.outputs.environment-path }}\Library
+            INCLUDE=${{ steps.micromamba.outputs.environment-path }}\Library\include
+            LIB=${{ steps.micromamba.outputs.environment-path }}\Library\lib;${{ steps.micromamba.outputs.environment-path }}\libs
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish_pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build_wheels]
+    if: startsWith(github.ref, 'refs/tags/rdkit-typer-v')
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

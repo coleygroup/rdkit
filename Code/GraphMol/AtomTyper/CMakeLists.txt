@@ -3,8 +3,20 @@ rdkit_library(AtomTyper
               smarts_analyzer.cpp
               expression_builder.cpp
               parser.cpp
-              LINK_LIBRARIES GraphMol SmilesParse)
+              LINK_LIBRARIES GraphMol SmilesParse ChemTransforms)
 target_compile_definitions(AtomTyper PRIVATE RDKIT_ATOMTYPER_BUILD)
+
+option(RDK_BUILD_TRACY "Enable Tracy profiling for AtomTyper targets" OFF)
+if(RDK_BUILD_TRACY)
+    set(_TRACY_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../tracy")
+    if(EXISTS "${_TRACY_SOURCE_DIR}/CMakeLists.txt")
+        add_subdirectory("${_TRACY_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/tracy" EXCLUDE_FROM_ALL)
+        target_link_libraries(AtomTyper PUBLIC TracyClient)
+        target_compile_definitions(AtomTyper PUBLIC TRACY_ENABLE)
+    else()
+        message(WARNING "RDK_BUILD_TRACY=ON but Tracy source not found at ${_TRACY_SOURCE_DIR}")
+    endif()
+endif()
 
 rdkit_headers(atom_typer.hpp
               smarts_analyzer.hpp
@@ -22,7 +34,16 @@ rdkit_catch_test(testExpressionBuilder test_expression_builder.cpp
                  LINK_LIBRARIES AtomTyper SmilesParse)
 
 add_executable(smartsAnalyzerSmoke smarts_analyzer_smoke.cpp)
-target_link_libraries(smartsAnalyzerSmoke PRIVATE AtomTyper SmilesParse)
+target_link_libraries(smartsAnalyzerSmoke PRIVATE AtomTyper SmilesParse SubstructMatch)
+if(RDK_BUILD_TRACY)
+    target_link_libraries(smartsAnalyzerSmoke PRIVATE TracyClient)
+endif()
+
+add_executable(smartsAnalyzerMatchsetSmoke smarts_analyzer_matchset_smoke.cpp)
+target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE AtomTyper SmilesParse SubstructMatch)
+if(RDK_BUILD_TRACY)
+    target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE TracyClient)
+endif()
 
 if(RDK_BUILD_PYTHON_WRAPPERS)
     add_subdirectory(Wrap)
