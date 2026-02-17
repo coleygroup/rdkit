@@ -68,14 +68,35 @@ jobs:
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            find /tmp -type f -name 'libRDKit*.so.*' | while read -r f; do
-              d=$(dirname "$f");
-              b=$(basename "$f");
-              soname=$(printf '%s' "$b" | sed -E 's/^(libRDKit[^ ]*\.so\.[0-9]+).*/\1/');
-              if [ -n "$soname" ] && [ ! -e "$d/$soname" ]; then ln -s "$b" "$d/$soname" || true; fi;
-            done;
-            RDKIT_LIB_DIRS=$(find /tmp -type f -name 'libRDKit*.so*' -printf '%h\n' | sort -u | tr '\n' ':');
+            set -euxo pipefail;
+
+            # 1) locate RDKit libs in likely roots (repo + deps prefix + tmp)
+            RDKIT_LIB_DIRS="$((
+              find /project /opt/rdkit-deps /tmp -type f -name 'libRDKit*.so*' -printf '%h\n' 2>/dev/null || true
+            ) | sort -u | tr '\n' ':')";
+
+            echo "RDKIT_LIB_DIRS=$RDKIT_LIB_DIRS";
+
+            # 2) make sure SONAME symlinks exist next to versioned files
+            IFS=':' read -r -a dirs <<< "$RDKIT_LIB_DIRS"
+            for d in "${dirs[@]}"; do
+              [ -d "$d" ] || continue
+              find "$d" -maxdepth 1 -type f -name 'libRDKit*.so.*' | while read -r f; do
+                b=$(basename "$f");
+                soname=$(printf '%s' "$b" | sed -E 's/^(libRDKit[^ ]*\.so\.[0-9]+).*/\1/');
+                if [ -n "$soname" ] && [ ! -e "$d/$soname" ]; then ln -s "$b" "$d/$soname" || true; fi;
+              done
+            done
+
+            # 3) ensure the specific missing lib exists somewhere before invoking auditwheel
+            if ! (echo "$RDKIT_LIB_DIRS" | tr ':' '\n' | while read -r d; do [ -e "$d/libRDKitRDGeometryLib.so.1" ] && echo "FOUND: $d" && exit 0; done); then
+              echo "ERROR: libRDKitRDGeometryLib.so.1 still not found. Dumping candidates:"
+              find /project /opt/rdkit-deps /tmp -name 'libRDKitRDGeometryLib.so*' -print || true
+              exit 1
+            fi
+
             export LD_LIBRARY_PATH="${RDKIT_LIB_DIRS}/opt/rdkit-deps/lib:${LD_LIBRARY_PATH}";
+            auditwheel show {wheel}
             auditwheel repair -w {dest_dir} {wheel}
           # Linux uses manylinux containers. Bootstrap native deps inside container.
           CIBW_BEFORE_ALL_LINUX: >-
