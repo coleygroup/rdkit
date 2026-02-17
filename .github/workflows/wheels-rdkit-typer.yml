@@ -2,6 +2,15 @@ name: wheels-rdkit-typer
 
 on:
   workflow_dispatch:
+    inputs:
+      repair_only:
+        description: "Run Linux repair replay only (skip wheel build/publish)"
+        required: false
+        default: "false"
+      repair_run_id:
+        description: "Workflow run ID containing linux-repair-state artifact"
+        required: false
+        default: ""
   push:
     tags:
       - "rdkit-typer-v*"
@@ -11,6 +20,7 @@ permissions:
 
 jobs:
   build_wheels:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.repair_only != 'true'
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -56,6 +66,11 @@ jobs:
         run: |
           echo "micromamba env path: ${{ steps.micromamba.outputs.environment-path }}"
 
+      - name: Validate Linux repair script syntax
+        if: runner.os == 'Linux'
+        run: |
+          bash -n .github/scripts/repair_linux_wheel.sh
+
       - name: Build wheels
         if: runner.os == 'Linux'
         uses: pypa/cibuildwheel@v2.21.3
@@ -68,36 +83,7 @@ jobs:
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            set -euxo pipefail;
-
-            # 1) locate RDKit libs in likely roots (repo + deps prefix + tmp)
-            RDKIT_LIB_DIRS="$((
-              find /project /opt/rdkit-deps /tmp -type f -name 'libRDKit*.so*' -printf '%h\n' 2>/dev/null || true
-            ) | sort -u | tr '\n' ':')";
-
-            echo "RDKIT_LIB_DIRS=$RDKIT_LIB_DIRS";
-
-            # 2) make sure SONAME symlinks exist next to versioned files
-            IFS=':' read -r -a dirs <<< "$RDKIT_LIB_DIRS"
-            for d in "${dirs[@]}"; do
-              [ -d "$d" ] || continue
-              find "$d" -maxdepth 1 -type f -name 'libRDKit*.so.*' | while read -r f; do
-                b=$(basename "$f");
-                soname=$(printf '%s' "$b" | sed -E 's/^(libRDKit[^ ]*\.so\.[0-9]+).*/\1/');
-                if [ -n "$soname" ] && [ ! -e "$d/$soname" ]; then ln -s "$b" "$d/$soname" || true; fi;
-              done
-            done
-
-            # 3) ensure the specific missing lib exists somewhere before invoking auditwheel
-            if ! (echo "$RDKIT_LIB_DIRS" | tr ':' '\n' | while read -r d; do [ -e "$d/libRDKitRDGeometryLib.so.1" ] && echo "FOUND: $d" && exit 0; done); then
-              echo "ERROR: libRDKitRDGeometryLib.so.1 still not found. Dumping candidates:"
-              find /project /opt/rdkit-deps /tmp -name 'libRDKitRDGeometryLib.so*' -print || true
-              exit 1
-            fi
-
-            export LD_LIBRARY_PATH="${RDKIT_LIB_DIRS}/opt/rdkit-deps/lib:${LD_LIBRARY_PATH}";
-            auditwheel show {wheel}
-            auditwheel repair -w {dest_dir} {wheel}
+            bash /project/.github/scripts/repair_linux_wheel.sh {wheel} {dest_dir}
           # Linux uses manylinux containers. Bootstrap native deps inside container.
           CIBW_BEFORE_ALL_LINUX: >-
             set -euxo pipefail;
@@ -137,11 +123,21 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
 
+      - name: Upload Linux repair debug state
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-repair-state
+          retention-days: 3
+          path: |
+            /tmp/cibuildwheel
+            /opt/rdkit-deps
+
   publish_pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: [build_wheels]
-    if: startsWith(github.ref, 'refs/tags/rdkit-typer-v')
+    if: (github.event_name != 'workflow_dispatch' || github.event.inputs.repair_only != 'true') && startsWith(github.ref, 'refs/tags/rdkit-typer-v')
     permissions:
       id-token: write
 
@@ -161,7 +157,7 @@ jobs:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
     needs: [build_wheels]
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.repair_only != 'true'
     permissions:
       id-token: write
     environment:
@@ -179,3 +175,42 @@ jobs:
         with:
           packages-dir: dist
           repository-url: https://test.pypi.org/legacy/
+
+  repair_linux_only:
+    name: Repair Linux wheel only
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.repair_only == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download linux repair state from prior run
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ github.event.inputs.repair_run_id }}
+          name: linux-repair-state
+          path: .
+
+      - name: Show downloaded debug files
+        run: |
+          find . -maxdepth 4 -type d | sort
+
+      - name: Install auditwheel
+        run: |
+          python -m pip install --upgrade pip auditwheel
+
+      - name: Replay Linux repair step
+        run: |
+          WHEEL_PATH=$(find . -type f -name '*.whl' | head -n1)
+          test -n "$WHEEL_PATH"
+          mkdir -p repaired_wheel
+          export SEARCH_ROOTS="$(pwd)"
+          bash .github/scripts/repair_linux_wheel.sh "$WHEEL_PATH" "$(pwd)/repaired_wheel"
+
+      - name: Upload repaired wheel replay artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repaired-wheel-replay
+          path: repaired_wheel/*.whl
