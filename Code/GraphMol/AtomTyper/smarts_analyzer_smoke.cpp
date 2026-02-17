@@ -82,7 +82,7 @@ int main() {
   atom_typer::AtomTyper at;
   std::vector<std::string> results;
   try {
-    results = sa.standard_smarts(smarts_list, true, false, false);
+    results = sa.standard_smarts(smarts_list, false, false, false);
   } catch (const std::exception &e) {
     std::cerr << "!!! Error during SMARTS analysis: " << e.what() << std::endl;
     return 1;

@@ -2311,7 +2311,7 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
         std::cout << ">>> Extracted SMARTS: " << extracted_smarts << std::endl;
       }
       const auto variants2_taut =
-          sa.enumerate_variants(extracted_smarts, 1000, verbose, false);
+          sa.enumerate_variants(extracted_smarts, 20000, verbose, false);
       // const auto variants2_taut = perceive_tautomers(variants2, verbose);
 
       bool seen_invalid = false;
