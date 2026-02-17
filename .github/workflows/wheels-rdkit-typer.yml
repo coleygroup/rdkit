@@ -68,6 +68,12 @@ jobs:
           CIBW_BEFORE_BUILD: >-
             python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            find /tmp -type f -name 'libRDKit*.so.*' | while read -r f; do
+              d=$(dirname "$f");
+              b=$(basename "$f");
+              soname=$(printf '%s' "$b" | sed -E 's/^(libRDKit[^ ]*\.so\.[0-9]+).*/\1/');
+              if [ -n "$soname" ] && [ ! -e "$d/$soname" ]; then ln -s "$b" "$d/$soname" || true; fi;
+            done;
             RDKIT_LIB_DIRS=$(find /tmp -type f -name 'libRDKit*.so*' -printf '%h\n' | sort -u | tr '\n' ':');
             export LD_LIBRARY_PATH="${RDKIT_LIB_DIRS}/opt/rdkit-deps/lib:${LD_LIBRARY_PATH}";
             auditwheel repair -w {dest_dir} {wheel}
