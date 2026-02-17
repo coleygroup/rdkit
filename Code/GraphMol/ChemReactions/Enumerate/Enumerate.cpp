@@ -40,8 +40,11 @@
 #include <GraphMol/SmilesParse/SmilesWrite.h>
 
 #include <RDGeneral/BoostStartInclude.h>
+#ifdef RDK_HAVE_MULTIPREC
 #include <boost/multiprecision/cpp_int.hpp>
+#endif
 #ifdef RDK_USE_BOOST_SERIALIZATION
+
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
 #include <boost/serialization/shared_ptr.hpp>

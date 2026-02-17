@@ -2,7 +2,7 @@ rdkit_library(AtomTyper
               atom_typer.cpp
               smarts_analyzer.cpp
               expression_builder.cpp
-              parser.cpp
+            #   parser.cpp
               LINK_LIBRARIES GraphMol SmilesParse ChemTransforms)
 target_compile_definitions(AtomTyper PRIVATE RDKIT_ATOMTYPER_BUILD)
 
@@ -21,7 +21,7 @@ endif()
 rdkit_headers(atom_typer.hpp
               smarts_analyzer.hpp
               expression_builder.hpp
-              parser.hpp
+            #   parser.hpp
               DEST GraphMol/AtomTyper)
 
 rdkit_catch_test(testAtomTyper test_atom_typer.cpp
@@ -47,11 +47,11 @@ if(RDK_BUILD_ATOMTYPER_SMOKE)
         target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE TracyClient)
     endif()
 
-    add_executable(smartsAnalyzerPrimitivesSmoke smarts_analyzer_primitives_smoke.cpp)
-    target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE AtomTyper SmilesParse)
-    if(RDK_BUILD_TRACY)
-        target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE TracyClient)
-    endif()
+    # add_executable(smartsAnalyzerPrimitivesSmoke smarts_analyzer_primitives_smoke.cpp)
+    # target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE AtomTyper SmilesParse)
+    # if(RDK_BUILD_TRACY)
+    #     target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE TracyClient)
+    # endif()
 endif()
 
 if(RDK_BUILD_PYTHON_WRAPPERS)

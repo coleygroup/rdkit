@@ -1,0 +1,68 @@
+{% set name = "rdkit-typer" %}
+{% set version = "2026.3.1.post0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  # This ensures we link against the python version specified in the build command
+  string: py{{ CONDA_PY }}_h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}
+  run_exports:
+    # This ensures downstream packages use the same ABI
+    - {{ pin_subpackage(name, max_pin='x.x') }}
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+    - cmake >=3.18
+    - ninja
+    - pkg-config
+  host:
+    - python
+    - pip
+    - numpy
+    # Use devel packages for headers/linking. 
+    # These contain run_exports that automatically add the runtime libs to 'run'
+    - libboost-devel
+    - libboost-python-devel
+    - eigen
+    - zlib
+    - xz
+    - sqlite
+    - cairo
+    - pillow
+    - matplotlib-base  # lighter dependency than 'matplotlib'
+    - pandas
+  run:
+    - python
+    - {{ pin_compatible('numpy') }}
+    # Boost runtime libs are added automatically here by the host deps
+    - cairo
+    - pillow
+    - matplotlib-base
+    - pandas
+
+test:
+  requires:
+    - pytest
+  imports:
+    - rdkit
+    - rdkit.Chem
+  commands:
+    - python -c "from rdkit import Chem; assert Chem.MolFromSmiles('CCO') is not None"
+
+about:
+  home: https://www.rdkit.org
+  summary: RDKit fork with AtomTyper extensions
+  license: BSD-3-Clause
+  license_file: license.txt
+
+extra:
+  recipe-maintainers:
+    - bmahjour
