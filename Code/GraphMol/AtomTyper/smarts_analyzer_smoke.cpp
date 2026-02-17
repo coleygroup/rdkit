@@ -47,9 +47,9 @@ int main() {
       // "[$([!#1!#6]1~[#6]=[#6]~1)]",
       // "[!#1!#6]1=[#6]~[#6]~1",
       // "[!#1!#6]1~[#6]=[#6]~1",
-
+      "[NR1]1=[CR1][CR1][CR1][CR1]1"
       // "[SR1]1[SR1][CR1]=[CR1][CR1]1",
-      "[C]/[C&H1&D2&+0]=[C&H1&D2&+0]\\[C]",
+      // "[C]/[C&H1&D2&+0]=[C&H1&D2&+0]\\[C]",
       // "O/[N&H0&D2&+0]=[C&H0&D3&+0](\[N&H2&D1&+0])-[c&H0&D3&+0](:[c]):[c]"
       // "[#6&!$([CX4]([SX2])([#7,O,S,F,Cl,Br,I,P]))&!$([CX3]([SX2])=[OX1,SX1,NX2,C])&!$([#6][SX2]C#N)][SX2][#6&!$([CX4]([SX2])([#7,O,S,F,Cl,Br,I,P]))&!$([CX3]([SX2])=[OX1,SX1,NX2,C])&!$([#6][SX2]C#N)]",
       // "c[OX2&!$([OX2r3])]c",
@@ -111,10 +111,10 @@ int main() {
                 << " precision=" << bench.precision
                 << " recall=" << bench.recall << " f1=" << bench.f1 << std::endl
                 << std::endl;
-      // std::cout << "before-only rows" << std::endl;
-      // for (const auto &row_smiles : bench.initial_only_rows) {
-      //   std::cout << row_smiles.second << std::endl;
-      // }
+      std::cout << "before-only rows" << std::endl;
+      for (const auto &row_smiles : bench.initial_only_rows) {
+        std::cout << row_smiles.second << std::endl;
+      }
     } catch (const std::exception &e) {
       std::cerr << "benchmark error: " << e.what() << std::endl;
     }

@@ -6,6 +6,7 @@
 #include <GraphMol/SmilesParse/SmartsWrite.h>
 #include <GraphMol/Descriptors/MolDescriptors.h>
 #include <GraphMol/QueryOps.h>
+#include <GraphMol/Substruct/SubstructMatch.h>
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/Atom.h>
 #include <GraphMol/Bond.h>
@@ -1775,24 +1776,6 @@ std::vector<PatternItem> AtomTyper::type_atoms_from_smiles(
   return items;
 }
 
-// std::vector<AtomType> AtomTyper::type_atoms_from_smarts(
-//     const std::string &smarts) {
-//   if (smarts.empty()) {
-//     throw std::runtime_error("Empty SMARTS string");
-//   }
-
-//   // Parse SMARTS
-//   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
-//   if (!mol) {
-//     throw std::runtime_error("Failed to parse SMARTS: " + smarts);
-//   }
-
-//   // Update property cache and find rings for SMARTS molecules
-//   mol->updatePropertyCache();
-//   RDKit::MolOps::findSSSR(*mol);
-
-//   return pimpl->process_molecule(mol.get(), true);
-// }
 
 std::string AtomTyper::type_atoms_from_smarts(const std::string &smarts) {
   int max_amap = 0;
@@ -1866,6 +1849,14 @@ std::string AtomTyper::type_atoms_from_smarts(
   RDKit::RWMol rewritten(*mol);
   std::vector<std::unique_ptr<RDKit::ROMol>> query_mol_owners;
   query_mol_owners.reserve(rewritten.getNumAtoms());
+
+  try {
+    rewritten.updatePropertyCache(false);
+    RDKit::MolOps::findSSSR(rewritten);
+  } catch (...) {
+    // Ring perception may fail for partial query graphs; keep best-effort
+    // behavior and fall back to atom-level ring flags.
+  }
 
   if (verbose) {
     std::cerr << "[type_atoms_from_smarts] Original SMARTS: " << smarts
@@ -2095,6 +2086,12 @@ std::string AtomTyper::type_atoms_from_smarts(
     const bool end_aromatic_only = atom_is_aromatic_only(end_idx);
     const bool begin_aliphatic_only = atom_is_aliphatic_only(begin_idx);
     const bool end_aliphatic_only = atom_is_aliphatic_only(end_idx);
+    const bool bond_in_ring = rewritten.getRingInfo() &&
+                  rewritten.getRingInfo()->numBondRings(
+                    bond->getIdx()) > 0;
+    const bool endpoints_in_ring =
+      begin_idx < atom_types.size() && end_idx < atom_types.size() &&
+      atom_types[begin_idx].is_in_ring && atom_types[end_idx].is_in_ring;
 
     const std::string bond_smarts =
         RDKit::SmartsWrite::GetBondSmarts(bond, begin_idx);
@@ -2102,7 +2099,12 @@ std::string AtomTyper::type_atoms_from_smarts(
 
     if (unspecified_bond) {
       if (begin_aliphatic_only && end_aliphatic_only) {
-        set_bond_from_token(bond, "-");
+        // Do not force '-' for ring connections when the input bond was
+        // unspecified; preserve ring ambiguity unless caller explicitly used
+        // '-'.
+        if (!(bond_in_ring || endpoints_in_ring)) {
+          set_bond_from_token(bond, "-");
+        }
       } else if (begin_aromatic_only && end_aromatic_only) {
         set_bond_from_token(bond, ":");
       }
@@ -2228,10 +2230,65 @@ std::map<std::string, double> AtomTyper::get_default_query_embedding() const {
   };
 }
 
+bool AtomTyper::inspect_tautomer(const std::string &smarts,
+                                 bool verbose) const {
+  if (smarts.empty()) {
+    return false;
+  }
+
+  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
+  if (!mol) {
+    return false;
+  }
+
+  struct TautomerPattern {
+    const char *name;
+    const char *query;
+  };
+
+  static const std::vector<TautomerPattern> patterns = {
+      // Nitro-like resonance/tautomeric query forms
+      {"nitro_neutral", "[#7](=[#8])=[#8]"},
+      {"nitro_charged", "[#7+](=[#8])-[#8-]"},
+
+      // Common prototropic motifs (keto/enol, amide/imidic, amidine-like)
+      {"keto_enol", "[#6X3](=[#8X1])-[#6]"},
+      {"amide_imidic", "[#7]-[#6X3](=[#8X1])"},
+      {"amidine", "[#7]-[#6X3]=[#7]"},
+
+      // Aromatic [nH] tautomerizable systems
+      {"aromatic_nh", "[nH]"},
+  };
+
+  for (const auto &pat : patterns) {
+    std::unique_ptr<RDKit::ROMol> q(RDKit::SmartsToMol(pat.query));
+    if (!q) {
+      continue;
+    }
+    std::vector<RDKit::MatchVectType> matches;
+    if (RDKit::SubstructMatch(*mol, *q, matches) && !matches.empty()) {
+      if (verbose) {
+        std::cout << "inspect_tautomer: matched pattern '" << pat.name
+                  << "' | smarts='" << smarts << "'" << std::endl;
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
                                         bool verbose) const {
   ZoneScopedN("AtomTyper::is_valid_valence_smarts");
   const auto fail = [&](const std::string &reason) {
+    if (inspect_tautomer(smarts, verbose)) {
+      if (verbose) {
+        std::cout << "is_valid_valence_smarts: tautomer override | reason='"
+                  << reason << "' | smarts='" << smarts << "'" << std::endl;
+      }
+      return true;
+    }
     if (verbose) {
       std::cout << "is_valid_valence_smarts: " << reason << " | smarts='"
                 << smarts << "'" << std::endl;
@@ -2591,6 +2648,58 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
       }
       if (any_valid) {
         break;
+      }
+    }
+
+    // Fallback: allow protonated ring-hetero assignment when the baseline
+    // candidate grid has no valence-consistent solution.
+    // This helps tautomeric/prototropic ring systems where a heteroatom can
+    // gain one proton with formal +1 while remaining a valid query target.
+    if (!any_valid) {
+      const bool ring_member = at.explicit_in_ring.value_or(at.is_in_ring);
+      const bool hetero_atom = at.atomic_number > 1 && at.atomic_number != 6;
+      const bool allow_charge_plus_one =
+          !at.explicit_charge.has_value() &&
+          std::find(at.excluded_charges.begin(), at.excluded_charges.end(),
+                    +1) == at.excluded_charges.end();
+      const bool allow_h_increment = !at.explicit_H.has_value();
+
+      if (ring_member && hetero_atom && allow_charge_plus_one &&
+          allow_h_increment) {
+        std::set<int> boosted_h_candidates;
+        for (int h_count : h_candidates) {
+          const int boosted_h = h_count + 1;
+          if (boosted_h > 4) {
+            continue;
+          }
+          if (std::find(at.excluded_h_counts.begin(), at.excluded_h_counts.end(),
+                        boosted_h) != at.excluded_h_counts.end()) {
+            continue;
+          }
+          boosted_h_candidates.insert(boosted_h);
+        }
+
+        for (int h_count : boosted_h_candidates) {
+          for (bool aromflag : aromatic_options) {
+            if (pimpl->is_valence_consistent(
+                    at, h_count, +1, test_single_bonds, test_double_bonds,
+                    test_triple_bonds, test_aromatic_bonds, aromflag,
+                    verbose ? DebugLevel::Verbose : DebugLevel::Off)) {
+              any_valid = true;
+              if (verbose) {
+                std::cout
+                    << "is_valid_valence_smarts: accepted protonated ring-hetero "
+                    << "fallback at atom idx=" << at.atom_idx
+                    << " (Z=" << at.atomic_number << ", H=" << h_count
+                    << ", charge=+1)" << std::endl;
+              }
+              break;
+            }
+          }
+          if (any_valid) {
+            break;
+          }
+        }
       }
     }
 

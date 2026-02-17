@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build_wheels:
@@ -182,13 +183,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate repair_run_id input
+        run: |
+          test -n "${{ github.event.inputs.repair_run_id }}"
+          case "${{ github.event.inputs.repair_run_id }}" in
+            ''|*[!0-9]*) echo "repair_run_id must be a numeric workflow run id"; exit 1 ;;
+          esac
+
       - name: Download linux repair state from prior run
         uses: dawidd6/action-download-artifact@v6
         with:
+          repo: ${{ github.repository }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           run_id: ${{ github.event.inputs.repair_run_id }}
           name: linux-repair-state
           path: .

@@ -267,6 +267,20 @@ TEST_CASE_METHOD(AtomTyperFixture,
 }
 
 TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: inspect_tautomer recognizes nitro-like motif",
+                 "[AtomTyper]") {
+    CHECK(typer.inspect_tautomer("[#7](=[#8])=[#8]"));
+    CHECK_FALSE(typer.inspect_tautomer("[#6]-[#6]"));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
+                 "AtomTyper: is_valid_valence_smarts allows tautomer override",
+                 "[AtomTyper]") {
+    const std::string tautomeric = "[#7](=[#8])=[#8]";
+    CHECK(typer.is_valid_valence_smarts(tautomeric));
+}
+
+TEST_CASE_METHOD(AtomTyperFixture,
                  "AtomTyper: filter_invalid_valence_smarts discards invalid",
                  "[AtomTyper]") {
     const std::vector<std::string> input = {

@@ -203,6 +203,13 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
                                bool verbose = false) const;
 
   /**
+   * Inspect whether a SMARTS contains a known tautomeric motif that should
+   * be tolerated by valence screening.
+   */
+  bool inspect_tautomer(const std::string &smarts,
+                        bool verbose = false) const;
+
+  /**
    * Filter input SMARTS patterns, keeping only valence-valid patterns.
    */
   std::vector<std::string> filter_invalid_valence_smarts(
