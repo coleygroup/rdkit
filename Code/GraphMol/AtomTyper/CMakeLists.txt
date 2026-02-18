@@ -1,5 +1,6 @@
 rdkit_library(AtomTyper
               atom_typer.cpp
+                            atom_typer_query_reorder.cpp
               smarts_analyzer.cpp
               expression_builder.cpp
             #   parser.cpp
@@ -19,6 +20,7 @@ if(RDK_BUILD_TRACY)
 endif()
 
 rdkit_headers(atom_typer.hpp
+                            atom_typer_query_reorder.hpp
               smarts_analyzer.hpp
               expression_builder.hpp
             #   parser.hpp

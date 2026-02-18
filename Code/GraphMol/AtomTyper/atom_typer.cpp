@@ -1,4 +1,5 @@
 #include "atom_typer.hpp"
+#include "atom_typer_query_reorder.hpp"
 #include <GraphMol/GraphMol.h>
 #include <GraphMol/MolOps.h>
 #include <GraphMol/PeriodicTable.h>
@@ -16,7 +17,6 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
-#include <limits>
 #include <optional>
 #include <regex>
 #include <set>
@@ -40,6 +40,7 @@ class AtomTyper::Impl {
  public:
   bool use_canonical = false;
   DebugLevel default_debug_level = DebugLevel::Off;
+  bool recanon_comparison_trace = false;
 
   struct EnumerationSettings {
     int h_min = 0;
@@ -48,6 +49,7 @@ class AtomTyper::Impl {
     int charge_max = 1;
     DebugLevel debug_level = DebugLevel::Off;
     bool include_x_in_reserialization = false;
+    bool enumerate_bond_order = true;
   };
 
   static int debug_level_to_int(DebugLevel level) {
@@ -250,9 +252,9 @@ class AtomTyper::Impl {
     }
     const auto &ovalens = ptable->getValenceList(atomic_number);
     // for (int ovalen : ovalens) {
-    //   std::cerr << ovalen << " ";
+    //   std::cout << ovalen << " ";
     // }
-    // std::cerr << std::endl;
+    // std::cout << std::endl;
     unsigned int effective_atomic_num =
         static_cast<unsigned int>(atomic_number);
     if (ovalens.size() > 1 || ovalens[0] != -1) {
@@ -774,132 +776,6 @@ class AtomTyper::Impl {
     return std::to_string(charge);
   }
 
-  bool is_atom_and_query(const std::string &desc) const {
-    return desc == "AtomAnd" || desc == "And";
-  }
-
-  bool is_atom_or_query(const std::string &desc) const {
-    return desc == "AtomOr" || desc == "Or";
-  }
-
-  std::string normalize_embedding_token(std::string token) const {
-    if (token.size() >= 2 && token.front() == '[' && token.back() == ']') {
-      token = token.substr(1, token.size() - 2);
-    }
-    return token;
-  }
-
-  std::string primitive_token_from_query(
-      const RDKit::Atom::QUERYATOM_QUERY *query) const {
-    if (!query) {
-      return "*";
-    }
-    RDKit::QueryAtom tmp(0);
-    tmp.setQuery(query->copy());
-    return normalize_embedding_token(RDKit::SmartsWrite::GetAtomSmarts(&tmp));
-  }
-
-  double default_embedding_score(
-      const std::map<std::string, double> &embedding) const {
-    if (embedding.empty()) {
-      return 1.0;
-    }
-    double max_val = std::numeric_limits<double>::lowest();
-    for (const auto &kv : embedding) {
-      max_val = std::max(max_val, kv.second);
-    }
-    return max_val + 1.0;
-  }
-
-  double score_query_node(const RDKit::Atom::QUERYATOM_QUERY *query,
-                          const std::map<std::string, double> &embedding,
-                          double default_score) const {
-    if (!query) {
-      return default_score;
-    }
-
-    const std::string desc = query->getDescription();
-    if (is_atom_and_query(desc) || is_atom_or_query(desc)) {
-      double score = default_score;
-      bool has_child = false;
-      for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-        score = std::min(score,
-                         score_query_node(it->get(), embedding, default_score));
-        has_child = true;
-      }
-      return has_child ? score : default_score;
-    }
-
-    const std::string token = primitive_token_from_query(query);
-    const auto found = embedding.find(token);
-    if (found != embedding.end()) {
-      return found->second;
-    }
-    return default_score;
-  }
-
-  std::unique_ptr<RDKit::Atom::QUERYATOM_QUERY> reorder_atom_query_tree(
-      const RDKit::Atom::QUERYATOM_QUERY *query,
-      const std::map<std::string, double> &embedding,
-      double default_score) const {
-    if (!query) {
-      return nullptr;
-    }
-
-    const std::string desc = query->getDescription();
-    const bool is_and = is_atom_and_query(desc);
-    const bool is_or = is_atom_or_query(desc);
-    if (!is_and && !is_or) {
-      return std::unique_ptr<RDKit::Atom::QUERYATOM_QUERY>(query->copy());
-    }
-
-    struct RankedChild {
-      std::unique_ptr<RDKit::Atom::QUERYATOM_QUERY> query;
-      double score = 0.0;
-      size_t original_idx = 0;
-    };
-
-    std::vector<RankedChild> children;
-    size_t idx = 0;
-    for (auto it = query->beginChildren(); it != query->endChildren();
-         ++it, ++idx) {
-      auto child = reorder_atom_query_tree(it->get(), embedding, default_score);
-      if (!child) {
-        continue;
-      }
-      const double score =
-          score_query_node(child.get(), embedding, default_score);
-      children.push_back({std::move(child), score, idx});
-    }
-
-    std::stable_sort(children.begin(), children.end(),
-                     [is_and](const RankedChild &a, const RankedChild &b) {
-                       if (a.score == b.score) {
-                         return a.original_idx < b.original_idx;
-                       }
-                       // Smaller score => rarer expression.
-                       // AtomAnd: rarer first. AtomOr: rarer last.
-                       return is_and ? (a.score < b.score)
-                                     : (a.score > b.score);
-                     });
-
-    std::unique_ptr<RDKit::Atom::QUERYATOM_QUERY> out(
-        is_and ? static_cast<RDKit::Atom::QUERYATOM_QUERY *>(
-                     new RDKit::ATOM_AND_QUERY)
-               : static_cast<RDKit::Atom::QUERYATOM_QUERY *>(
-                     new RDKit::ATOM_OR_QUERY));
-    out->setDescription(is_and ? "AtomAnd" : "AtomOr");
-    out->setNegation(query->getNegation());
-    out->setTypeLabel(query->getTypeLabel());
-
-    for (auto &child : children) {
-      out->addChild(
-          RDKit::Atom::QUERYATOM_QUERY::CHILD_TYPE(child.query.release()));
-    }
-
-    return out;
-  }
-
   bool is_valence_consistent(const AtomType &at, int h_count, int charge,
                              int single_bonds, int double_bonds,
                              int triple_bonds, int aromatic_bonds, bool arom,
@@ -1003,7 +879,7 @@ class AtomTyper::Impl {
     // complain. We treat aromaticity as handled by the ring embedding above.
     // if (debug_level_to_int(debug_level) >=
     //     debug_level_to_int(DebugLevel::Verbose)) {
-    //   std::cerr << "Constructed probe molecule: "
+    //   std::cout << "Constructed probe molecule: "
     //             << RDKit::MolToSmiles(temp_mol)
     //             << " with properties: Z=" << at.atomic_number
     //             << " H=" << h_count << " q=" << charge << " s=" <<
@@ -1025,7 +901,7 @@ class AtomTyper::Impl {
     } catch (...) {
       if (debug_level_to_int(debug_level) >=
           debug_level_to_int(DebugLevel::Verbose)) {
-        std::cerr << "Sanitization failed for candidate: Z=" << at.atomic_number
+        std::cout << "Sanitization failed for candidate: Z=" << at.atomic_number
                   << " " << failedOp << " H=" << h_count << " q=" << charge
                   << " s=" << single_bonds << " d=" << double_bonds
                   << " t=" << triple_bonds << " a=" << aromatic_bonds
@@ -1037,7 +913,7 @@ class AtomTyper::Impl {
     if (temp_mol.getAtomWithIdx(aidx)->getTotalNumHs() != h_count) {
       // if (debug_level_to_int(debug_level) >=
       //     debug_level_to_int(DebugLevel::Verbose)) {
-      //   std::cerr << "[is_valence_consistent] H count mismatch for "
+      //   std::cout << "[is_valence_consistent] H count mismatch for "
       //             << RDKit::MolToSmiles(temp_mol) << ": expected " << h_count
       //             << ", got " <<
       //             temp_mol.getAtomWithIdx(aidx)->getTotalNumHs()
@@ -1050,7 +926,7 @@ class AtomTyper::Impl {
             debug_level_to_int(DebugLevel::Verbose) &&
         !temp_mol.getAtomWithIdx(aidx)->hasValenceViolation()) {
       int deg = single_bonds + double_bonds + triple_bonds + aromatic_bonds;
-      std::cerr << "[is_valence_consistent] " << RDKit::MolToSmiles(temp_mol)
+      std::cout << "[is_valence_consistent] " << RDKit::MolToSmiles(temp_mol)
                 << " " << h_count << " " << charge << " " << single_bonds << " "
                 << double_bonds << " " << triple_bonds << " " << aromatic_bonds
                 << " " << temp_mol.getAtomWithIdx(0)->getNumRadicalElectrons()
@@ -1081,7 +957,7 @@ class AtomTyper::Impl {
     };
 
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << "Enumerating alternatives for atom index "
+      std::cout << "Enumerating alternatives for atom index "
                 << at.atom.atom_idx
                 << " with SMARTS pattern: " << at.atom.source_atom_smarts
                 << " extracted: " << "explicit_charge: "
@@ -1145,7 +1021,7 @@ class AtomTyper::Impl {
                 << "\n max_valence: " << at.atom.max_valence << std::endl
                 << "bond_types:" << std::endl;
       for (const auto &bt : at.atom.bond_types) {
-        std::cerr << "  " << bt.first << ": " << bt.second << std::endl;
+        std::cout << "  " << bt.first << ": " << bt.second << std::endl;
       }
     }
 
@@ -1248,30 +1124,30 @@ class AtomTyper::Impl {
       arom.push_back(0);
     }
 
-    // std::cerr << arom.size() << std::endl;
+    // std::cout << arom.size() << std::endl;
     // for (int a : arom) {
-    //   std::cerr << "Arom: " << a << std::endl;
+    //   std::cout << "Arom: " << a << std::endl;
     // }
 
     std::vector<Candidate> candidates;
     std::set<std::tuple<int, int, int, int, int, int, int, bool>>
         seen_candidates;
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << "Candidate generation ranges:" << std::endl;
-      std::cerr << "  H: " << hs.front() << " to " << hs.back() << std::endl;
-      std::cerr << "  Charge: " << charges.front() << " to " << charges.back()
+      std::cout << "Candidate generation ranges:" << std::endl;
+      std::cout << "  H: " << hs.front() << " to " << hs.back() << std::endl;
+      std::cout << "  Charge: " << charges.front() << " to " << charges.back()
                 << std::endl;
-      std::cerr << "  Degree: " << degree_values.front() << " to "
+      std::cout << "  Degree: " << degree_values.front() << " to "
                 << degree_values.back() << std::endl;
-      std::cerr << "  Single bonds: " << single_bond_values.front() << " to "
+      std::cout << "  Single bonds: " << single_bond_values.front() << " to "
                 << single_bond_values.back() << std::endl;
-      std::cerr << "  Double bonds: " << double_bond_values.front() << " to "
+      std::cout << "  Double bonds: " << double_bond_values.front() << " to "
                 << double_bond_values.back() << std::endl;
-      std::cerr << "  Triple bonds: " << triple_bond_values.front() << " to "
+      std::cout << "  Triple bonds: " << triple_bond_values.front() << " to "
                 << triple_bond_values.back() << std::endl;
-      std::cerr << "  Aromatic bonds: " << aromatic_bond_values.front()
+      std::cout << "  Aromatic bonds: " << aromatic_bond_values.front()
                 << " to " << aromatic_bond_values.back() << std::endl;
-      // std::cerr << " aromatic flag: " << arom.front() << " to " <<
+      // std::cout << " aromatic flag: " << arom.front() << " to " <<
       // arom.back()
       //           << std::endl;
     }
@@ -1284,7 +1160,7 @@ class AtomTyper::Impl {
               for (int aromatic_bonds : aromatic_bond_values) {
                 for (int aromflag : arom) {
                   // if (settings.debug_level == DebugLevel::Verbose) {
-                  // std::cerr
+                  // std::cout
                   //     << "Testing candidate: "
                   //     << " Z=" << at.atom.atomic_number << "H=" << h_count
                   //     << " Charge=" << charge << " Single=" << single_bonds
@@ -1308,7 +1184,7 @@ class AtomTyper::Impl {
                   if (at.atom.explicit_X.has_value() &&
                       (degree + h_count) != *at.atom.explicit_X) {
                     // if (settings.debug_level == DebugLevel::Verbose) {
-                    //   std::cerr << "  Skipping due to explicit X constraint:
+                    //   std::cout << "  Skipping due to explicit X constraint:
                     //   "
                     //             << *at.atom.explicit_X << std::endl;
                     // }
@@ -1321,7 +1197,7 @@ class AtomTyper::Impl {
                                              lower_h_count + h_count;
                     if (valence_from_bonds != *at.atom.explicit_valence) {
                       if (settings.debug_level == DebugLevel::Verbose) {
-                        std::cerr
+                        std::cout
                             << "  Skipping due to explicit valence constraint: "
                             << *at.atom.explicit_valence << std::endl;
                       }
@@ -1340,7 +1216,7 @@ class AtomTyper::Impl {
                       std::find(degree_values.begin(), degree_values.end(),
                                 serialized_degree) == degree_values.end()) {
                     if (settings.debug_level == DebugLevel::Verbose) {
-                      std::cerr << "  Skipping due to degree constraint: "
+                      std::cout << "  Skipping due to degree constraint: "
                                 << serialized_degree << std::endl;
                     }
                     continue;
@@ -1361,7 +1237,7 @@ class AtomTyper::Impl {
       }
     }
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << "Generated " << candidates.size()
+      std::cout << "Generated " << candidates.size()
                 << " candidates before sorting." << std::endl;
     }
     if (candidates.empty()) {
@@ -1393,7 +1269,7 @@ class AtomTyper::Impl {
           << " source_smarts='" << at.atom.smarts_pattern
           << "'). Consider relaxing SMARTS constraints or enumeration bounds.";
       throw std::runtime_error(err.str());
-      //   std::cerr << err.str() << std::endl;
+      //   std::cout << err.str() << std::endl;
       //   return at.atom.source_atom_smarts;
       // }
     }
@@ -1489,13 +1365,13 @@ class AtomTyper::Impl {
         (!include_charge_terms || all_same_charge) &&
         (!include_arom_terms || all_same_arom);
 
-    const bool no_varying_terms =
-        no_varying_primitive_terms && all_same_single_bonds &&
-        all_same_double_bonds && all_same_triple_bonds &&
-        all_same_aromatic_bonds;
+    const bool include_bond_constraints = settings.enumerate_bond_order;
     const bool no_varying_bonds =
-        all_same_single_bonds && all_same_double_bonds &&
-        all_same_triple_bonds && all_same_aromatic_bonds;
+      !include_bond_constraints ||
+      (all_same_single_bonds && all_same_double_bonds &&
+       all_same_triple_bonds && all_same_aromatic_bonds);
+    const bool no_varying_terms =
+      no_varying_primitive_terms && no_varying_bonds;
     std::stringstream out;
 
     const auto append_added_bond_constraints =
@@ -1543,10 +1419,10 @@ class AtomTyper::Impl {
     }
 
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << "[enumerate_atom_alternatives] ;#alt=" << candidates.size()
+      std::cout << "[enumerate_atom_alternatives] ;#alt=" << candidates.size()
                 << std::endl;
       for (const auto &c : candidates) {
-        std::cerr << "[enumerate_atom_alternatives] Candidate: D=" << c.degree
+        std::cout << "[enumerate_atom_alternatives] Candidate: D=" << c.degree
                   << " H=" << c.h_count << " Charge=" << c.charge
                   << " Single=" << c.single_bonds
                   << " Double=" << c.double_bonds
@@ -1581,7 +1457,7 @@ class AtomTyper::Impl {
       }
     }
 
-    if (no_varying_bonds) {
+    if (include_bond_constraints && no_varying_bonds) {
       const int add_single =
           candidates.front().single_bonds - at.atom.num_single_bonds;
       const int add_double =
@@ -1600,7 +1476,7 @@ class AtomTyper::Impl {
     }
 
     if (settings.debug_level == DebugLevel::Verbose) {
-      std::cerr << "[enumerate_atom_alternatives] join flags "
+      std::cout << "[enumerate_atom_alternatives] join flags "
                 << no_varying_bonds << " " << no_varying_terms << " "
                 << " " << all_same_aromatic_bonds << " "
                 << all_same_single_bonds << " " << all_same_double_bonds << " "
@@ -1651,7 +1527,7 @@ class AtomTyper::Impl {
         wrote_any = true;
       }
 
-      if (!no_varying_bonds) {
+      if (include_bond_constraints && !no_varying_bonds) {
         const int add_single =
             candidates[i].single_bonds - at.atom.num_single_bonds;
         const int add_double =
@@ -1675,7 +1551,7 @@ class AtomTyper::Impl {
       }
       if (!wrote_any) {
         if (settings.debug_level == DebugLevel::Trace) {
-          std::cerr
+          std::cout
               << "Warning: candidate " << i
               << " has no varying terms but was not caught by all_same checks."
               << std::endl;
@@ -1787,41 +1663,44 @@ std::string AtomTyper::type_atoms_from_smarts(const std::string &smarts,
   int max_amap = 0;
   const bool verbose = debug_level != DebugLevel::Off;
   return type_atoms_from_smarts(smarts, 0, 4, -1, 1, verbose, debug_level,
-                                false, max_amap, false);
+                                false, max_amap, false, true);
 }
 
 std::string AtomTyper::type_atoms_from_smarts(
     const std::string &smarts, bool map_new_atoms, int &max_amap, bool verbose,
-    bool include_x_in_reserialization) {
+    bool include_x_in_reserialization, bool enumerate_bond_order) {
   return type_atoms_from_smarts(smarts, 0, 4, -1, 1, verbose,
                                 pimpl->default_debug_level, map_new_atoms,
-                                max_amap, include_x_in_reserialization);
+                                max_amap, include_x_in_reserialization,
+                                enumerate_bond_order);
 }
 
 std::string AtomTyper::type_atoms_from_smarts(
     const std::string &smarts, int h_min, int h_max, int charge_min,
     int charge_max, bool map_new_atoms, int &max_amap,
-    bool include_x_in_reserialization) {
+    bool include_x_in_reserialization, bool enumerate_bond_order) {
   return type_atoms_from_smarts(smarts, h_min, h_max, charge_min, charge_max,
                                 false, pimpl->default_debug_level,
                                 map_new_atoms, max_amap,
-                                include_x_in_reserialization);
+                                include_x_in_reserialization,
+                                enumerate_bond_order);
 }
 
 std::string AtomTyper::type_atoms_from_smarts(
     const std::string &smarts, int h_min, int h_max, int charge_min,
     int charge_max, bool verbose, DebugLevel debug_level, bool map_new_atoms,
-    int &max_amap, bool include_x_in_reserialization) {
+    int &max_amap, bool include_x_in_reserialization,
+    bool enumerate_bond_order) {
   ZoneScopedN("AtomTyper::enumerate_dof_smarts");
   if (smarts.empty()) {
-    std::cerr << "[type_atoms_from_smarts] Error: Empty SMARTS string provided."
+    std::cout << "[type_atoms_from_smarts] Error: Empty SMARTS string provided."
               << std::endl;
     throw std::runtime_error("Empty SMARTS string");
   }
 
   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
   if (!mol) {
-    std::cerr << "[type_atoms_from_smarts] Failed to parse SMARTS: " << smarts
+    std::cout << "[type_atoms_from_smarts] Failed to parse SMARTS: " << smarts
               << std::endl;
     throw std::runtime_error("Failed to parse SMARTS: " + smarts);
   }
@@ -1836,6 +1715,7 @@ std::string AtomTyper::type_atoms_from_smarts(
   settings.charge_max = std::max(charge_min, charge_max);
   settings.debug_level = verbose ? debug_level : DebugLevel::Off;
   settings.include_x_in_reserialization = include_x_in_reserialization;
+  settings.enumerate_bond_order = enumerate_bond_order;
 
   if (debug_level == DebugLevel::Verbose) {
     verbose = true;
@@ -1859,11 +1739,11 @@ std::string AtomTyper::type_atoms_from_smarts(
   }
 
   if (verbose) {
-    std::cerr << "[type_atoms_from_smarts] Original SMARTS: " << smarts
+    std::cout << "[type_atoms_from_smarts] Original SMARTS: " << smarts
               << std::endl;
     for (size_t i = 0; i < atom_types.size(); ++i) {
       const auto &at = atom_types[i];
-      std::cerr << "[type_atoms_from_smarts] Atom idx " << i
+      std::cout << "[type_atoms_from_smarts] Atom idx " << i
                 << ": Z=" << at.atomic_number << " H=" << at.num_hydrogens
                 << " q=" << at.formal_charge << " s=" << at.num_single_bonds
                 << " d=" << at.num_double_bonds << " t=" << at.num_triple_bonds
@@ -1926,7 +1806,7 @@ std::string AtomTyper::type_atoms_from_smarts(
     return false;
   };
   if (verbose) {
-    std::cerr << "[type_atoms_from_smarts] before atom enumeration, SMARTS: "
+    std::cout << "[type_atoms_from_smarts] before atom enumeration, SMARTS: "
               << RDKit::MolToSmarts(rewritten) << std::endl;
   }
 
@@ -1936,7 +1816,7 @@ std::string AtomTyper::type_atoms_from_smarts(
         RDKit::SmartsWrite::GetAtomSmarts(rewritten.getAtomWithIdx(i));
     if (is_single_primitive_atom_pattern(source_atom_smarts)) {
       if (verbose) {
-        std::cerr
+        std::cout
             << "[type_atoms_from_smarts] Skipping DoF enumeration for atom idx "
             << i << " (single primitive atom pattern): " << source_atom_smarts
             << std::endl;
@@ -1949,7 +1829,7 @@ std::string AtomTyper::type_atoms_from_smarts(
     atom_item.atom = atom_types[i];
     std::string atom_smarts;
     if (verbose) {
-      std::cerr
+      std::cout
           << "[type_atoms_from_smarts] Enumerating DoF alternatives for atom idx "
           << i << ": " << source_atom_smarts << std::endl;
     }
@@ -1958,8 +1838,8 @@ std::string AtomTyper::type_atoms_from_smarts(
       atom_smarts = pimpl->enumerate_atom_alternatives(atom_item, settings,
                                                        map_new_atoms, max_amap);
       if (verbose) {
-        //   std::cerr << i << ": " << std::endl;
-        std::cerr << "[type_atoms_from_smarts] Enumerated SMARTS for atom idx "
+        //   std::cout << i << ": " << std::endl;
+        std::cout << "[type_atoms_from_smarts] Enumerated SMARTS for atom idx "
                   << i << ": " << source_atom_smarts << " -> " << atom_smarts
                   << std::endl;
       }
@@ -1970,15 +1850,15 @@ std::string AtomTyper::type_atoms_from_smarts(
         std::stringstream err;
         err << "[type_atoms_from_smarts] Failed to enumerate DoF alternatives for atom idx="
             << i << " " << source_atom_smarts << ":";
-        std::cerr << err.str() << " Error: " << e.what() << std::endl;
+        std::cout << err.str() << " Error: " << e.what() << std::endl;
       }
       continue;
       //   atom_smarts = source_atom_smarts;
       //   throw std::runtime_error(err.str());
     }
     if (verbose) {
-      //   std::cerr << i << ": " << std::endl;
-      std::cerr << "[type_atoms_from_smarts] Enumerated SMARTS for atom idx "
+      //   std::cout << i << ": " << std::endl;
+      std::cout << "[type_atoms_from_smarts] Enumerated SMARTS for atom idx "
                 << i << ": " << source_atom_smarts << " -> " << atom_smarts
                 << std::endl;
     }
@@ -1988,7 +1868,7 @@ std::string AtomTyper::type_atoms_from_smarts(
         atom_smarts.find(',') != std::string::npos;
     if (parser_risky_atom_alt) {
       if (verbose) {
-        std::cerr << "[type_atoms_from_smarts] Skipping atom idx " << i
+        std::cout << "[type_atoms_from_smarts] Skipping atom idx " << i
                   << " due to parser-risky generated alternative (keeping "
                      "original query): "
                   << atom_smarts << std::endl;
@@ -1999,7 +1879,7 @@ std::string AtomTyper::type_atoms_from_smarts(
     std::unique_ptr<RDKit::ROMol> one_atom_mol(RDKit::SmartsToMol(atom_smarts));
     if (!one_atom_mol || one_atom_mol->getNumAtoms() != 1) {
       if (verbose) {
-        std::cerr << "[type_atoms_from_smarts] Skipping atom idx " << i
+        std::cout << "[type_atoms_from_smarts] Skipping atom idx " << i
                   << " because generated SMARTS could not be parsed as a "
                      "single atom query: "
                   << atom_smarts << std::endl;
@@ -2011,7 +1891,7 @@ std::string AtomTyper::type_atoms_from_smarts(
     auto *src_qatom = dynamic_cast<RDKit::QueryAtom *>(src_atom);
     if (!src_qatom || !src_qatom->getQuery()) {
       if (verbose) {
-        std::cerr << "[type_atoms_from_smarts] Invalid query atom for idx " << i
+        std::cout << "[type_atoms_from_smarts] Invalid query atom for idx " << i
                   << std::endl;
       }
       continue;
@@ -2022,7 +1902,7 @@ std::string AtomTyper::type_atoms_from_smarts(
       query_mol_owners.push_back(std::move(one_atom_mol));
     } catch (const std::exception &e) {
       if (verbose) {
-        std::cerr
+        std::cout
             << "[type_atoms_from_smarts] Error replacing atom query for idx "
             << i << ": " << e.what() << std::endl;
       }
@@ -2095,7 +1975,10 @@ std::string AtomTyper::type_atoms_from_smarts(
 
     const std::string bond_smarts =
         RDKit::SmartsWrite::GetBondSmarts(bond, begin_idx);
-    const bool unspecified_bond = bond_smarts.empty() || bond_smarts == "~";
+    // Preserve explicit any-bond (~) from input SMARTS.
+    // Only truly unspecified bonds (empty token) are eligible for
+    // normalization to '-' or ':'.
+    const bool unspecified_bond = bond_smarts.empty();
 
     if (unspecified_bond) {
       if (begin_aliphatic_only && end_aliphatic_only) {
@@ -2181,52 +2064,69 @@ std::string AtomTyper::type_atoms_from_smarts(
 
 std::string AtomTyper::reorder_query_tree_by_embedding(
     const std::string &smarts, const std::map<std::string, double> &embedding) {
-  if (smarts.empty()) {
-    throw std::runtime_error("Empty SMARTS string");
-  }
-
-  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
-  if (!mol) {
-    throw std::runtime_error("Failed to parse SMARTS: " + smarts);
-  }
-
-  RDKit::RWMol rewritten(*mol);
-  const double default_score = pimpl->default_embedding_score(embedding);
-
-  for (auto *atom : rewritten.atoms()) {
-    auto *qatom = dynamic_cast<RDKit::QueryAtom *>(atom);
-    if (!qatom || !qatom->hasQuery() || !qatom->getQuery()) {
-      continue;
-    }
-
-    auto reordered = pimpl->reorder_atom_query_tree(qatom->getQuery(),
-                                                    embedding, default_score);
-    if (!reordered) {
-      continue;
-    }
-    qatom->setQuery(reordered.release());
-  }
-
-  return RDKit::MolToSmarts(rewritten);
+  return query_reorder::reorder_query_tree_by_embedding_smarts(smarts,
+                                                               embedding);
 }
 
 std::map<std::string, double> AtomTyper::get_default_query_embedding() const {
   // Lower score => rarer/more selective primitive.
-  // This is intentionally heuristic and can be overridden by caller-provided
-  // embeddings.
+  // Default embedding seeded from observed primitive frequencies.
   return {
-      {"#1", 5.0},  {"#6", 30.0},  {"#7", 18.0}, {"#8", 16.0}, {"#9", 8.0},
-      {"#15", 7.0}, {"#16", 10.0}, {"#17", 7.0}, {"#35", 6.0}, {"#53", 6.0},
-
-      {"a", 9.0},   {"A", 20.0},   {"R", 12.0},  {"r5", 7.0},  {"r6", 8.0},
-      {"X2", 10.0}, {"X3", 12.0},  {"X4", 14.0}, {"D1", 12.0}, {"D2", 11.0},
-      {"D3", 10.0}, {"D4", 9.0},
-
-      {"H0", 12.0}, {"H1", 11.0},  {"H2", 9.0},  {"H3", 8.0},  {"+0", 13.0},
-      {"+1", 8.0},  {"-1", 8.0},
-
-      {"!H0", 6.0}, {"!H1", 7.0},  {"!a", 8.0},  {"!A", 7.0},  {"!R", 8.0},
-      {"!#6", 6.0}, {"!#7", 6.0},  {"!#8", 6.0},
+      {"O", 49042},   {"!O", 252807}, {"D1", 68386},   {"!D1", 233463},
+      {"H0", 126406}, {"!H0", 175443}, {"C", 117448},   {"!C", 184401},
+      {"D3", 91399},  {"!D3", 210450}, {"+0", 298536},  {"!+0", 3313},
+      {"c", 92059},   {"!c", 209790}, {"N", 19923},    {"!N", 281926},
+      {"H1", 105310}, {"!H1", 196539}, {"D2", 133464},  {"!D2", 168385},
+      {"H2", 51180},  {"!H2", 250669}, {"S", 2707},     {"!S", 299142},
+      {"#11", 133},   {"!#11", 301716}, {"Cl", 1998},   {"!Cl", 299851},
+      {"#7", 30837},  {"!#7", 271012}, {"a", 104226},   {"!a", 197623},
+      {"n", 10914},   {"!n", 290935}, {"Br", 385},      {"!Br", 301464},
+      {"H3", 18932},  {"!H3", 282917}, {"I", 318},      {"!I", 301531},
+      {"-1", 1680},   {"!-1", 300169}, {"P", 1366},     {"!P", 300483},
+      {"#16", 3371},  {"!#16", 298478}, {"F", 3413},    {"!F", 298436},
+      {"+1", 1158},   {"!+1", 300691}, {"#19", 51},     {"!#19", 301798},
+      {"D4", 7450},   {"!D4", 294399}, {"#12", 61},     {"!#12", 301788},
+      {"#14", 51},    {"!#14", 301798}, {"D0", 1126},   {"!D0", 300723},
+      {"#8", 49623},  {"!#8", 252226}, {"H4", 12},      {"!H4", 301837},
+      {"#55", 1},     {"!#55", 301848}, {"#3", 10},     {"!#3", 301839},
+      {"#34", 26},    {"!#34", 301823}, {"#50", 6},     {"!#50", 301843},
+      {"B", 84},      {"!B", 301765}, {"#5", 84},      {"!#5", 301765},
+      {"#30", 34},    {"!#30", 301815}, {"+3", 140},    {"!+3", 301709},
+      {"s", 664},     {"!s", 301185}, {"o", 581},      {"!o", 301268},
+      {"#15", 1367},  {"!#15", 300482}, {"-2", 106},    {"!-2", 301743},
+      {"#25", 9},     {"!#25", 301840}, {"#24", 14},    {"!#24", 301835},
+      {"#13", 55},    {"!#13", 301794}, {"D5", 9},      {"!D5", 301840},
+      {"#31", 10},    {"!#31", 301839}, {"#33", 23},    {"!#33", 301826},
+      {"#83", 15},    {"!#83", 301834}, {"#52", 1},     {"!#52", 301848},
+      {"#81", 4},     {"!#81", 301845}, {"*", 301849},  {"#51", 11},
+      {"!#51", 301838}, {"+2", 184},   {"!+2", 301665}, {"#22", 2},
+      {"!#22", 301847}, {"#79", 9},    {"!#79", 301840}, {"#26", 90},
+      {"!#26", 301759}, {"#47", 9},    {"!#47", 301840}, {"#29", 23},
+      {"!#29", 301826}, {"!#32", 301849}, {"p", 1},     {"!p", 301848},
+      {"#44", 3},     {"!#44", 301846}, {"#1", 70},     {"!#1", 301779},
+      {"#89", 1},     {"!#89", 301848}, {"#80", 20},    {"!#80", 301829},
+      {"#82", 1},     {"!#82", 301848}, {"D6", 14},     {"!D6", 301835},
+      {"#58", 2},     {"!#58", 301847}, {"#74", 4},     {"!#74", 301845},
+      {"#20", 34},    {"!#20", 301815}, {"#28", 2},     {"!#28", 301847},
+      {"#49", 7},     {"!#49", 301842}, {"#40", 4},     {"!#40", 301845},
+      {"#54", 4},     {"!#54", 301845}, {"#73", 7},     {"!#73", 301842},
+      {"+5", 5},      {"!+5", 301844}, {"#56", 2},      {"!#56", 301847},
+      {"#78", 11},    {"!#78", 301838}, {"#48", 1},     {"!#48", 301848},
+      {"#46", 2},     {"!#46", 301847}, {"#42", 24},    {"!#42", 301825},
+      {"#23", 20},    {"!#23", 301829}, {"!#77", 301849}, {"#53", 318},
+      {"!#53", 301531}, {"#27", 16},   {"!#27", 301833}, {"#57", 3},
+      {"!#57", 301846}, {"!D8", 301849}, {"se", 7},     {"!se", 301842},
+      {"!#45", 301849}, {"#62", 3},    {"!#62", 301846}, {"+4", 22},
+      {"!+4", 301827}, {"#39", 2},     {"!#39", 301847}, {"!#72", 301849},
+      {"-3", 5},      {"!-3", 301844}, {"-4", 4},       {"!-4", 301845},
+      {"+6", 8},      {"!+6", 301841}, {"#17", 1998},   {"!#17", 299851},
+      {"#35", 385},   {"!#35", 301464}, {"#9", 3413},   {"!#9", 298436},
+      {"#76", 1},     {"!#76", 301848}, {"#75", 2},     {"!#75", 301847},
+      {"!#93", 301849}, {"!#92", 301849}, {"#41", 1},   {"!#41", 301848},
+      {"#64", 13},    {"!#64", 301836}, {"!#95", 301849}, {"!#94", 301849},
+      {"!H7", 301849}, {"!H6", 301849}, {"!#63", 301849}, {"!#65", 301849},
+      {"#38", 6},     {"!#38", 301843}, {"#43", 14},    {"!#43", 301835},
+      {"!H5", 301849},
   };
 }
 
@@ -2988,6 +2888,154 @@ std::vector<std::string> AtomTyper::consolidate_smarts_by_atom_maps(
   return out;
 }
 
+std::vector<std::string> AtomTyper::consolidate_smarts_by_atom_maps_recanon(
+    const std::vector<std::string> &patterns,
+    const std::map<std::string, double> &embedding) const {
+  if (patterns.empty()) {
+    return {};
+  }
+
+  const bool trace_enabled =
+      static_cast<int>(pimpl->default_debug_level) >=
+      static_cast<int>(DebugLevel::Trace);
+
+  const std::map<std::string, double> &active_embedding =
+      embedding.empty() ? get_default_query_embedding() : embedding;
+
+  query_reorder::set_comparison_trace_enabled(pimpl->recanon_comparison_trace);
+
+  if (trace_enabled) {
+    std::cout << "[consolidate_smarts_by_atom_maps_recanon] input_count="
+              << patterns.size() << " embedding="
+              << (embedding.empty() ? "default" : "custom")
+              << " embedding_size=" << active_embedding.size() << std::endl;
+  }
+
+  const auto normalize_atom_maps_dense = [](const std::string &smarts) {
+    const std::regex atom_re("\\[[^\\]]+\\]");
+
+    const auto strip_brackets = [](const std::string &token) {
+      if (token.size() >= 2 && token.front() == '[' && token.back() == ']') {
+        return token.substr(1, token.size() - 2);
+      }
+      return token;
+    };
+
+    const auto parse_map_from_inner = [](const std::string &inner) {
+      const auto colon = inner.rfind(':');
+      if (colon == std::string::npos || colon + 1 >= inner.size()) {
+        return 0U;
+      }
+      for (size_t i = colon + 1; i < inner.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(inner[i]))) {
+          return 0U;
+        }
+      }
+      return static_cast<unsigned int>(std::stoul(inner.substr(colon + 1)));
+    };
+
+    const auto strip_map_suffix = [&](const std::string &inner) {
+      const auto colon = inner.rfind(':');
+      if (colon == std::string::npos) {
+        return inner;
+      }
+      bool all_digits = (colon + 1 < inner.size());
+      for (size_t i = colon + 1; i < inner.size() && all_digits; ++i) {
+        all_digits = std::isdigit(static_cast<unsigned char>(inner[i]));
+      }
+      if (all_digits) {
+        return inner.substr(0, colon);
+      }
+      return inner;
+    };
+
+    std::map<unsigned int, unsigned int> remap;
+    unsigned int next = 1;
+
+    std::string out;
+    out.reserve(smarts.size());
+    size_t cursor = 0;
+    for (std::sregex_iterator it(smarts.begin(), smarts.end(), atom_re), end;
+         it != end; ++it) {
+      const auto &m = *it;
+      const size_t start = static_cast<size_t>(m.position());
+      const size_t len = static_cast<size_t>(m.length());
+      out += smarts.substr(cursor, start - cursor);
+
+      const std::string tok = m.str();
+      const std::string inner = strip_brackets(tok);
+      const unsigned int old_map = parse_map_from_inner(inner);
+      if (old_map == 0U) {
+        out += tok;
+      } else {
+        auto remap_it = remap.find(old_map);
+        if (remap_it == remap.end()) {
+          remap_it = remap.emplace(old_map, next++).first;
+        }
+        out += "[" + strip_map_suffix(inner) + ":" +
+               std::to_string(remap_it->second) + "]";
+      }
+
+      cursor = start + len;
+    }
+    out += smarts.substr(cursor);
+    return out;
+  };
+
+  std::vector<std::string> reordered_patterns;
+  reordered_patterns.reserve(patterns.size());
+
+  for (size_t i = 0; i < patterns.size(); ++i) {
+    const auto &pat = patterns[i];
+    if (pat.empty()) {
+      if (trace_enabled) {
+        std::cout
+            << "[consolidate_smarts_by_atom_maps_recanon] pattern[" << i
+            << "] skipped (empty input)" << std::endl;
+      }
+      continue;
+    }
+
+    std::string reordered;
+    try {
+      reordered =
+          query_reorder::reorder_query_tree_by_embedding_smarts(pat,
+                                                                active_embedding);
+    } catch (const std::exception &e) {
+      throw std::runtime_error(
+          "Failed to reorder pattern index " + std::to_string(i) +
+          " in consolidate_smarts_by_atom_maps_recanon: " + e.what());
+    }
+
+    const std::string normalized = normalize_atom_maps_dense(reordered);
+    reordered_patterns.push_back(normalized);
+
+    if (trace_enabled) {
+      std::cout << "[consolidate_smarts_by_atom_maps_recanon] pattern[" << i
+                << "] reordered_changed=" << (reordered != pat ? "yes" : "no")
+                << " map_normalized="
+                << (normalized != reordered ? "yes" : "no")
+                << "\n  in : " << pat << "\n  out: " << reordered
+                << "\n  norm: " << normalized
+                << std::endl;
+    }
+  }
+
+  const auto consolidated = consolidate_smarts_by_atom_maps(reordered_patterns);
+
+  if (trace_enabled) {
+    std::cout << "[consolidate_smarts_by_atom_maps_recanon] reordered_count="
+              << reordered_patterns.size()
+              << " consolidated_count=" << consolidated.size() << std::endl;
+    for (size_t i = 0; i < consolidated.size(); ++i) {
+      std::cout << "[consolidate_smarts_by_atom_maps_recanon] consolidated["
+                << i << "] " << consolidated[i] << std::endl;
+    }
+  }
+
+  return consolidated;
+}
+
 std::string AtomTyper::consolidate_smarts_with_recursive_paths(
     const std::vector<std::string> &patterns) const {
   if (patterns.empty()) {
@@ -3220,6 +3268,67 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
     return sig;
   };
 
+  const auto recursive_option_to_mapped_single_atom =
+      [&](const std::string &recursive_option,
+          unsigned int amap) -> std::string {
+    if (recursive_option.size() < 4 || recursive_option.rfind("$(", 0) != 0 ||
+        recursive_option.back() != ')') {
+      return std::string();
+    }
+    const std::string inner =
+        recursive_option.substr(2, recursive_option.size() - 3);
+    std::unique_ptr<RDKit::ROMol> inner_mol(RDKit::SmartsToMol(inner));
+    if (!inner_mol || inner_mol->getNumAtoms() != 1) {
+      return std::string();
+    }
+    auto *atom = inner_mol->getAtomWithIdx(0);
+    if (!atom) {
+      return std::string();
+    }
+    atom->setAtomMapNum(amap);
+    return RDKit::MolToSmarts(*inner_mol);
+  };
+
+  const auto remap_single_atom_smarts = [&](const std::string &smarts,
+                                            unsigned int amap) {
+    std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
+    if (!mol || mol->getNumAtoms() != 1) {
+      return std::string();
+    }
+    auto *atom = mol->getAtomWithIdx(0);
+    if (!atom) {
+      return std::string();
+    }
+    atom->setAtomMapNum(amap);
+    return RDKit::MolToSmarts(*mol);
+  };
+
+  const auto has_top_level_comma_in_atom_inner =
+      [&](const std::string &single_atom_smarts) {
+    if (single_atom_smarts.size() < 2 || single_atom_smarts.front() != '[' ||
+        single_atom_smarts.back() != ']') {
+      return false;
+    }
+
+    const std::string inner =
+        single_atom_smarts.substr(1, single_atom_smarts.size() - 2);
+    int paren_depth = 0;
+    for (const char ch : inner) {
+      if (ch == '(') {
+        ++paren_depth;
+        continue;
+      }
+      if (ch == ')') {
+        --paren_depth;
+        continue;
+      }
+      if (ch == ',' && paren_depth == 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   std::map<unsigned int, std::string> replacements;
   for (const auto divergent_map : divergent_maps) {
     std::map<std::string, std::string> canonical_to_best_option;
@@ -3296,6 +3405,44 @@ std::string AtomTyper::consolidate_smarts_with_recursive_paths(
                 // << kv.second << std::endl;
     }
     std::sort(recursive_options.begin(), recursive_options.end());
+
+    // Second-stage consolidation for recursive OR alternatives:
+    // convert $(...) options into mapped single-atom SMARTS, consolidate them
+    // with map-aware factoring, then use the compact one-atom result when
+    // possible.
+    {
+      std::vector<std::string> mapped_recursive_options;
+      mapped_recursive_options.reserve(recursive_options.size());
+      bool all_convertible = true;
+      bool has_nested_or_in_input = false;
+      for (const auto &opt : recursive_options) {
+        const std::string mapped_one_atom =
+            recursive_option_to_mapped_single_atom(opt, divergent_map);
+        if (mapped_one_atom.empty()) {
+          all_convertible = false;
+          break;
+        }
+        if (has_top_level_comma_in_atom_inner(mapped_one_atom)) {
+          has_nested_or_in_input = true;
+          break;
+        }
+        mapped_recursive_options.push_back(mapped_one_atom);
+      }
+
+      if (all_convertible && !has_nested_or_in_input &&
+          !mapped_recursive_options.empty()) {
+        const auto compact_options =
+            consolidate_smarts_by_atom_maps_recanon(mapped_recursive_options);
+        if (compact_options.size() == 1) {
+          const std::string remapped =
+              remap_single_atom_smarts(compact_options.front(), divergent_map);
+          if (!remapped.empty()) {
+            replacements[divergent_map] = remapped;
+            continue;
+          }
+        }
+      }
+    }
 
     std::stringstream replacement_ss;
     replacement_ss << "[";
@@ -3549,6 +3696,11 @@ void AtomTyper::set_use_canonical(bool use_canonical) {
 
 void AtomTyper::set_debug_level(DebugLevel level) {
   pimpl->default_debug_level = level;
+}
+
+void AtomTyper::set_recanon_comparison_trace(bool enabled) {
+  pimpl->recanon_comparison_trace = enabled;
+  query_reorder::set_comparison_trace_enabled(enabled);
 }
 
 }  // namespace atom_typer

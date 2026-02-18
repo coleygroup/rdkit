@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -91,7 +93,7 @@ inline std::filesystem::path resolve_default_dataset_path() {
   const std::vector<std::filesystem::path> candidates = {
       std::filesystem::path(
           "C:/Projects/atype/rdkit/Code/GraphMol/AtomTyper/all_substruct_data.csv"),
-      std::filesystem::path("Code/GraphMol/AtomTyper/all_substruct_data.csv"),
+      std::filesystem::path("Code/GraphMol/AtomTyper/sigma_smiles.csv"),
       std::filesystem::path(
           "rdkit/Code/GraphMol/AtomTyper/all_substruct_data.csv")};
 
@@ -105,7 +107,9 @@ inline std::filesystem::path resolve_default_dataset_path() {
 }
 
 inline std::vector<TargetMol> load_targets_from_csv(
-    const std::filesystem::path &path) {
+    const std::filesystem::path &path, size_t target_limit = 0,
+    bool random_selection = false,
+    std::optional<unsigned int> random_seed = std::nullopt) {
   std::ifstream in(path);
   if (!in.good()) {
     throw std::runtime_error("Failed to open CSV file: " + path.string());
@@ -154,13 +158,13 @@ inline std::vector<TargetMol> load_targets_from_csv(
     }
 
     std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles, 0, false));
-    try{
-        mol->updatePropertyCache(false);
-        RDKit::MolOps::findSSSR(*mol);
-    } catch (...) {
-        continue;
-    }
     if (!mol) {
+      continue;
+    }
+    try {
+      mol->updatePropertyCache(false);
+      RDKit::MolOps::findSSSR(*mol);
+    } catch (...) {
       continue;
     }
 
@@ -169,6 +173,15 @@ inline std::vector<TargetMol> load_targets_from_csv(
     tm.smiles = smiles;
     tm.mol = std::move(mol);
     out.push_back(std::move(tm));
+  }
+
+  if (target_limit > 0 && out.size() > target_limit) {
+    if (random_selection) {
+      std::mt19937 rng(
+          random_seed.has_value() ? *random_seed : std::random_device{}());
+      std::shuffle(out.begin(), out.end(), rng);
+    }
+    out.resize(target_limit);
   }
 
   return out;
@@ -197,7 +210,9 @@ inline double ratio(size_t num, size_t den) {
 
 inline SubstructBenchmarkResult benchmark_smarts_pair(
     const std::string &initial_smarts, const std::string &final_smarts,
-    const std::filesystem::path &dataset_path = std::filesystem::path()) {
+    const std::filesystem::path &dataset_path = std::filesystem::path(),
+    size_t target_limit = 0, bool random_selection = false,
+    std::optional<unsigned int> random_seed = std::nullopt) {
   if (initial_smarts.empty() || final_smarts.empty()) {
     throw std::runtime_error("Both initial and final SMARTS must be non-empty");
   }
@@ -205,7 +220,8 @@ inline SubstructBenchmarkResult benchmark_smarts_pair(
   const std::filesystem::path resolved_dataset =
       dataset_path.empty() ? resolve_default_dataset_path() : dataset_path;
 
-  const auto targets = load_targets_from_csv(resolved_dataset);
+  const auto targets = load_targets_from_csv(resolved_dataset, target_limit,
+                                             random_selection, random_seed);
 
   SubstructBenchmarkResult out;
   out.dataset_path = resolved_dataset;

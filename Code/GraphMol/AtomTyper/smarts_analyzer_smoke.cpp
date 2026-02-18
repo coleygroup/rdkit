@@ -34,7 +34,7 @@ int main() {
 
   const std::vector<std::string> smarts_list = {
       // "[#6&!$(C#N)][CX3](=[OX1])",
-      // "[H][CX3]([#1,#6])=[OX1]",
+      // "[H][CX3]([#1,#6,$([!#1!#6]1~[#6]=[#6]~1)])=[OX1]",
       // "aF",
       // "[#6][Sv6X4](=[O])(=[O])[OH1,O-]",
       // // "[$([NX3](=[OX1])=[OX1])]",
@@ -47,7 +47,9 @@ int main() {
       // "[$([!#1!#6]1~[#6]=[#6]~1)]",
       // "[!#1!#6]1=[#6]~[#6]~1",
       // "[!#1!#6]1~[#6]=[#6]~1",
-      "[NR1]1=[CR1][CR1][CR1][CR1]1"
+      "[#16X2H][C,N;H1]"
+      // "[#16X2H]"
+      // "[NR1]1=[CR1][CR1][CR1][CR1]1"
       // "[SR1]1[SR1][CR1]=[CR1][CR1]1",
       // "[C]/[C&H1&D2&+0]=[C&H1&D2&+0]\\[C]",
       // "O/[N&H0&D2&+0]=[C&H0&D3&+0](\[N&H2&D1&+0])-[c&H0&D3&+0](:[c]):[c]"
@@ -81,15 +83,24 @@ int main() {
   atom_typer::SmartsAnalyzer sa;
   atom_typer::AtomTyper at;
   std::vector<std::string> results;
+
+  atom_typer::SmartsAnalyzer::StandardSmartsLogOptions log_options;
+  atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options;
+  workflow_options.include_x_in_reserialization = false;
+  workflow_options.enumerate_bond_order = false;
+  log_options.flags = atom_typer::SmartsAnalyzer::LogRecanonComparisons | atom_typer::SmartsAnalyzer::LogSummary | atom_typer::SmartsAnalyzer::LogVariants | atom_typer::SmartsAnalyzer::LogFinal |  atom_typer::SmartsAnalyzer::LogValidation | atom_typer::SmartsAnalyzer::LogRecanon;
+  log_options.enabled = true;
+  // atom_typer::SmartsAnalyzer::LogAtomTyping
   try {
-    results = sa.standard_smarts(smarts_list, false, false, false);
+    results = sa.standard_smarts(smarts_list, false, false, false,
+                                 workflow_options, log_options);
   } catch (const std::exception &e) {
     std::cerr << "!!! Error during SMARTS analysis: " << e.what() << std::endl;
     return 1;
   }
-  std::cout << "Generated " << results.size()
+  std::cout << "\n\n\nGenerated " << results.size()
             << " standardized SMARTS variants." << std::endl;
-  for (int i = 0; i < results.size(); ++i) {
+  for (size_t i = 0; i < results.size(); ++i) {
     const auto &s = results[i];
     const std::string mapped_smarts = sa.add_atom_maps(smarts_list[i]);
 
@@ -112,8 +123,13 @@ int main() {
                 << " recall=" << bench.recall << " f1=" << bench.f1 << std::endl
                 << std::endl;
       std::cout << "before-only rows" << std::endl;
+      int ii = 0;
       for (const auto &row_smiles : bench.initial_only_rows) {
         std::cout << row_smiles.second << std::endl;
+        if (++ii >= 10) {
+          std::cout << "... (truncated)" << std::endl;
+          break;
+        }
       }
     } catch (const std::exception &e) {
       std::cerr << "benchmark error: " << e.what() << std::endl;

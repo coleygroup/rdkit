@@ -13,6 +13,8 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -87,6 +89,7 @@ std::filesystem::path resolve_dataset_path(int argc, char **argv) {
       std::filesystem::path(
           "C:\\Projects\\atype\\rdkit\\Code\\GraphMol\\AtomTyper\\all_substruct_data.csv"),
       std::filesystem::path("Code/GraphMol/AtomTyper/all_substruct_data.csv"),
+      std::filesystem::path("Code/GraphMol/AtomTyper/sigma_smiles.csv"),
       std::filesystem::path(
           "rdkit/Code/GraphMol/AtomTyper/all_substruct_data.csv")};
 
@@ -146,7 +149,35 @@ std::filesystem::path resolve_templates_path(int argc, char **argv) {
   return candidates.front();
 }
 
-std::vector<TargetMol> load_targets_from_csv(const std::filesystem::path &path) {
+
+std::filesystem::path resolve_large_templates_path(int argc, char **argv) {
+  if (argc > 3 && argv[3] && std::string(argv[3]).size() > 0) {
+    return std::filesystem::path(argv[3]);
+  }
+
+  const std::vector<std::filesystem::path> candidates = {
+      std::filesystem::path(
+          "C:\\Projects\\atype\\rdkit\\Code\\GraphMol\\AtomTyper\\ValidationPatterns.csv"),
+      std::filesystem::path(
+          "Code/GraphMol/AtomTyper/ValidationPatterns.csv"),
+      std::filesystem::path(
+          "rdkit/Code/GraphMol/AtomTyper/ValidationPatterns.csv")};
+
+  for (const auto &cand : candidates) {
+    if (std::filesystem::exists(cand)) {
+      std::cout << "Using template file: " << cand.string() << std::endl;
+      return cand;
+    }
+  }
+
+  return candidates.front();
+}
+
+
+std::vector<TargetMol> load_targets_from_csv(
+    const std::filesystem::path &path, size_t target_limit = 0,
+    bool random_selection = false,
+    std::optional<unsigned int> random_seed = std::nullopt) {
   std::ifstream in(path);
   if (!in.good()) {
     throw std::runtime_error("Failed to open CSV file: " + path.string());
@@ -213,6 +244,15 @@ std::vector<TargetMol> load_targets_from_csv(const std::filesystem::path &path) 
     tm.smiles = smiles;
     tm.mol = std::move(mol);
     out.push_back(std::move(tm));
+  }
+
+  if (target_limit > 0 && out.size() > target_limit) {
+    if (random_selection) {
+      std::mt19937 rng(
+          random_seed.has_value() ? *random_seed : std::random_device{}());
+      std::shuffle(out.begin(), out.end(), rng);
+    }
+    out.resize(target_limit);
   }
 
   return out;
@@ -363,6 +403,36 @@ int resolve_num_workers(int argc, char **argv) {
   return kDefaultWorkers;
 }
 
+size_t resolve_target_limit(int argc, char **argv) {
+  if (argc > 5 && argv[5] && std::string(argv[5]).size() > 0) {
+    try {
+      return static_cast<size_t>(std::stoull(argv[5]));
+    } catch (...) {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+bool resolve_random_selection(int argc, char **argv) {
+  if (argc > 6 && argv[6] && std::string(argv[6]).size() > 0) {
+    const std::string v = to_lower(trim(argv[6]));
+    return v == "1" || v == "true" || v == "yes" || v == "y";
+  }
+  return false;
+}
+
+std::optional<unsigned int> resolve_random_seed(int argc, char **argv) {
+  if (argc > 7 && argv[7] && std::string(argv[7]).size() > 0) {
+    try {
+      return static_cast<unsigned int>(std::stoul(argv[7]));
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+  return std::nullopt;
+}
+
 std::set<size_t> set_intersection_of(const std::set<size_t> &a,
                                      const std::set<size_t> &b) {
   std::set<size_t> out;
@@ -385,6 +455,7 @@ std::filesystem::path resolve_output_path(int argc, char **argv) {
   }
 
   const std::vector<std::filesystem::path> candidates = {
+    std::filesystem::path("/home/bmahjour/test_rdpp/manuscript/results/smarts_analyzer_matchset_report.txt"),
       std::filesystem::path(
           "C:\\Projects\\atype\\results\\smarts_analyzer_matchset_report.txt"),
       std::filesystem::path("results\\smarts_analyzer_matchset_report.txt")};
@@ -456,15 +527,21 @@ int main(int argc, char **argv) {
     const std::filesystem::path csv_path = resolve_dataset_path(argc, argv);
     // const std::filesystem::path template_path =
         // resolve_simple_templates_path(argc, argv);
+    // const std::filesystem::path template_path =
+        // resolve_templates_path(argc, argv);
     const std::filesystem::path template_path =
-        resolve_templates_path(argc, argv);
+        resolve_large_templates_path(argc, argv);
     const std::filesystem::path report_path = resolve_output_path(argc, argv);
     const int num_workers = resolve_num_workers(argc, argv);
+    const size_t target_limit = resolve_target_limit(argc, argv);
+    const bool random_selection = resolve_random_selection(argc, argv);
+    const std::optional<unsigned int> random_seed =
+      resolve_random_seed(argc, argv);
     const std::filesystem::path csv_report_path =
         report_path.parent_path() /
         (report_path.stem().string() + "_stats.csv");
-    const auto targets = load_targets_from_csv(csv_path);
-    const auto smarts_list = load_templates_from_csv(template_path, 60000);
+    const auto targets = load_targets_from_csv(csv_path, 5000, random_selection, 1);
+    const auto smarts_list = load_templates_from_csv(template_path, 100000);
     std::cout << "Dataset loaded: " << targets.size() << " molecules"
               << std::endl;
     std::cout << "Templates loaded: " << smarts_list.size() << std::endl;
@@ -495,6 +572,12 @@ int main(int argc, char **argv) {
     std::cout << "Template CSV path: " << template_path.string() << std::endl
               << std::endl;
     std::cout << "Worker threads: " << num_workers << std::endl;
+    std::cout << "Target limit: " << target_limit << std::endl;
+    std::cout << "Random selection: " << (random_selection ? "true" : "false")
+              << std::endl;
+    if (random_seed.has_value()) {
+      std::cout << "Random seed: " << *random_seed << std::endl;
+    }
     std::cout << "Writing report to: " << report_path.string() << std::endl;
 
     report << "SMARTS Matchset Comparison Report" << std::endl;
@@ -503,6 +586,12 @@ int main(int argc, char **argv) {
     report << "Target molecules loaded: " << targets.size() << std::endl;
     report << "Templates loaded: " << smarts_list.size() << std::endl;
     report << "Worker threads: " << num_workers << std::endl;
+    report << "Target limit: " << target_limit << std::endl;
+    report << "Random selection: " << (random_selection ? "true" : "false")
+           << std::endl;
+    if (random_seed.has_value()) {
+      report << "Random seed: " << *random_seed << std::endl;
+    }
     report << std::endl;
 
     csv_report << "query_idx,input_smarts,standardized_smarts,before_matches,"

@@ -146,7 +146,8 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
   std::string type_atoms_from_smarts(const std::string &smarts,
                                    bool map_new_atoms, int &max_amap,
                                    bool verbose=false,
-                                   bool include_x_in_reserialization=false);
+                                   bool include_x_in_reserialization=false,
+                                   bool enumerate_bond_order=true);
 
   /**
    * Overload: enumerate DOF SMARTS using custom default ranges for H and
@@ -155,7 +156,8 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
   std::string type_atoms_from_smarts(const std::string &smarts, int h_min,
                                    int h_max, int charge_min, int charge_max,
                                    bool map_new_atoms, int &max_amap,
-                                   bool include_x_in_reserialization=false);
+                                   bool include_x_in_reserialization=false,
+                                   bool enumerate_bond_order=true);
 
   /**
    * Overload: enumerate with custom ranges plus runtime verbosity controls.
@@ -165,7 +167,8 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
                                    int h_max, int charge_min, int charge_max,
                                    bool verbose, DebugLevel debug_level,
                                    bool map_new_atoms, int &max_amap,
-                                   bool include_x_in_reserialization=false);
+                                   bool include_x_in_reserialization=false,
+                                   bool enumerate_bond_order=true);
   // Overload: enumerate with custom debug level but default H/charge ranges and
   // verbosity=true
   std::string type_atoms_from_smarts(const std::string &smarts,
@@ -225,6 +228,16 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
       const std::vector<std::string> &patterns) const;
 
       /**
+       * Re-canonicalize each input SMARTS by reordering atom-query trees using an
+       * embedding, then consolidate by atom-map index.
+       *
+       * If `embedding` is empty, the built-in default embedding is used.
+       */
+      std::vector<std::string> consolidate_smarts_by_atom_maps_recanon(
+        const std::vector<std::string> &patterns,
+        const std::map<std::string, double> &embedding = {}) const;
+
+      /**
        * Consolidate mapped SMARTS of different lengths into a single SMARTS by
        * embedding divergent mapped-atom pathways as recursive alternatives at the
        * divergent atom-map position.
@@ -263,6 +276,12 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
    * Set default debug level used by enumeration workflows.
    */
   void set_debug_level(DebugLevel level);
+
+  /**
+   * Enable/disable detailed query-reorder comparison tracing used by
+   * recanonicalization workflows.
+   */
+  void set_recanon_comparison_trace(bool enabled);
 
  private:
   class Impl;

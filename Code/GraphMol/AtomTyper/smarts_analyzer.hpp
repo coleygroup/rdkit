@@ -18,6 +18,37 @@ namespace atom_typer {
  */
 class RDKIT_ATOMTYPER_EXPORT SmartsAnalyzer {
  public:
+    static constexpr unsigned int LogSummary = 1u << 0;
+    static constexpr unsigned int LogMapping = 1u << 1;
+    static constexpr unsigned int LogVariants = 1u << 2;
+    static constexpr unsigned int LogAtomTyping = 1u << 3;
+    static constexpr unsigned int LogValidation = 1u << 4;
+    static constexpr unsigned int LogFinal = 1u << 5;
+    static constexpr unsigned int LogErrors = 1u << 6;
+    static constexpr unsigned int LogRecanon = 1u << 7;
+    static constexpr unsigned int LogRecanonComparisons = 1u << 8;
+    static constexpr unsigned int LogAll = 0xFFFFFFFFu;
+
+    struct StandardSmartsLogOptions {
+        constexpr StandardSmartsLogOptions(bool enabled_in = false,
+                                           unsigned int flags_in = LogAll)
+            : enabled(enabled_in), flags(flags_in) {}
+
+        bool enabled;
+        unsigned int flags;
+    };
+
+    struct StandardSmartsWorkflowOptions {
+        constexpr StandardSmartsWorkflowOptions(
+            bool include_x_in_reserialization_in = false,
+            bool enumerate_bond_order_in = true)
+            : include_x_in_reserialization(include_x_in_reserialization_in),
+              enumerate_bond_order(enumerate_bond_order_in) {}
+
+        bool include_x_in_reserialization;
+        bool enumerate_bond_order;
+    };
+
   SmartsAnalyzer();   // Constructor
   ~SmartsAnalyzer();  // Destructor
 
@@ -38,7 +69,8 @@ class RDKIT_ATOMTYPER_EXPORT SmartsAnalyzer {
   std::vector<std::string> enumerate_variants(const std::string &,
                                               int max = 1000,
                                               bool verbose = false,
-                                              bool carry_atom_maps = false);
+                                              bool carry_atom_maps = false,
+                                              bool enumerate_bond_order = true);
 
   /**
    * Add atom map numbers to each atom in the SMARTS, including atoms inside
@@ -52,13 +84,27 @@ class RDKIT_ATOMTYPER_EXPORT SmartsAnalyzer {
 
   std::vector<std::vector<std::string>> generate_all_combos(
       std::vector<std::string> smarts_list, bool verbose,
-      bool include_x_in_reserialization = false, bool ignoreValence = false,
-      bool catchErrors = true);
+      bool ignoreValence = false, bool catchErrors = true,
+      const StandardSmartsWorkflowOptions &workflow_options =
+          StandardSmartsWorkflowOptions(),
+      const StandardSmartsLogOptions &log_options = StandardSmartsLogOptions());
+
+  std::vector<std::vector<std::string>> generate_all_combos(
+      std::vector<std::string> smarts_list, bool verbose,
+      bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
+      const StandardSmartsLogOptions &log_options = StandardSmartsLogOptions());
 
   std::vector<std::string> standard_smarts(
       const std::vector<std::string> &smarts_list, bool verbose,
-      bool include_x_in_reserialization = false, bool ignoreValence = false,
-      bool catchErrors = true);
+      bool ignoreValence = false, bool catchErrors = true,
+      const StandardSmartsWorkflowOptions &workflow_options =
+          StandardSmartsWorkflowOptions(),
+      const StandardSmartsLogOptions &log_options = StandardSmartsLogOptions());
+
+  std::vector<std::string> standard_smarts(
+      const std::vector<std::string> &smarts_list, bool verbose,
+      bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
+      const StandardSmartsLogOptions &log_options = StandardSmartsLogOptions());
 
  private:
   class Impl;

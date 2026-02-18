@@ -1,5 +1,6 @@
 #include "smarts_analyzer.hpp"  //header file for smarts_analyzer.cpp
 #include "atom_typer.hpp"
+#include "atom_typer_query_reorder.hpp"
 #include <GraphMol/GraphMol.h>  // Core RDKit molecule functionality
 #include <GraphMol/MolOps.h>    // For molecule operations from RDKit molecule
 #include <GraphMol/SmilesParse/SmilesParse.h>  // For parsing SMILES strings
@@ -711,7 +712,7 @@ class SmartsAnalyzer::Impl {
           recursive_smarts, max_recursive_variants, false, carry_atom_maps);
     } catch (const std::exception &e) {
       // If expansion fails, return the original query
-      std::cerr << "Warning: Failed to expand recursive SMARTS '"
+      std::cout << "Warning: Failed to expand recursive SMARTS '"
                 << recursive_smarts << "': " << e.what() << std::endl;
       throw std::runtime_error("Failed to expand recursive SMARTS: " +
                                std::string(e.what()));
@@ -1023,11 +1024,12 @@ SmartsAnalyzer::~SmartsAnalyzer() = default;
  * Find the vector of all strings of SMARTS variants w/ max
  */
 std::vector<std::string> SmartsAnalyzer::enumerate_variants(
-    const std::string &smarts, int max, bool verbose, bool carry_atom_maps) {
+  const std::string &smarts, int max, bool verbose, bool carry_atom_maps,
+  bool enumerate_bond_order) {
   ZoneScopedN("SmartsAnalyzer::enumerate_variants");
   std::vector<std::string> results;
   if (verbose) {
-    std::cerr << "[enumerate_variants] input='" << smarts << "' max=" << max
+    std::cout << "[enumerate_variants] input='" << smarts << "' max=" << max
               << std::endl;
   }
 
@@ -1038,7 +1040,7 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
 
   if (!mol) {
-    std::cerr << "[enumerate_variants] failed to parse SMARTS: '" << smarts
+    std::cout << "[enumerate_variants] failed to parse SMARTS: '" << smarts
               << "'" << std::endl;
     return results;
   }
@@ -1049,7 +1051,7 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     input_atom_maps.push_back(atom ? atom->getAtomMapNum() : 0U);
   }
   if (verbose) {
-    std::cerr << "[enumerate_variants] parsed mol atoms=" << mol->getNumAtoms()
+    std::cout << "[enumerate_variants] parsed mol atoms=" << mol->getNumAtoms()
               << " bonds=" << mol->getNumBonds() << std::endl;
   }
 
@@ -1073,13 +1075,13 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     auto variants =
         pimpl->enumerate_query_variants(qatom->getQuery(), carry_atom_maps);
     if (verbose) {
-      std::cerr << "[enumerate_variants] atom idx=" << atom->getIdx()
+      std::cout << "[enumerate_variants] atom idx=" << atom->getIdx()
                 << " query_desc='" << qatom->getQuery()->getDescription()
                 << "' variants=" << variants.size() << std::endl;
     }
     if (variants.empty()) {
       if (verbose) {
-        std::cerr << "Warning: No variants generated for atom index "
+        std::cout << "Warning: No variants generated for atom index "
                   << atom->getIdx() << " with query description '"
                   << qatom->getQuery()->getDescription()
                   << "'. Using original query." << std::endl;
@@ -1098,30 +1100,32 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     variant_ptrs.push_back(std::move(ptrs));
   }
 
-  for (const auto *bond : mol->bonds()) {
-    if (!bond->hasQuery() || !bond->getQuery()) {
-      continue;
-    }
+  if (enumerate_bond_order) {
+    for (const auto *bond : mol->bonds()) {
+      if (!bond->hasQuery() || !bond->getQuery()) {
+        continue;
+      }
 
-    auto variants = pimpl->enumerate_bond_query_variants(bond->getQuery());
-    if (verbose) {
-      std::cerr << "[enumerate_variants] bond idx=" << bond->getIdx()
-                << " query_desc='" << bond->getQuery()->getDescription()
-                << "' variants=" << variants.size() << std::endl;
-    }
-    if (variants.empty()) {
-      variants.emplace_back(bond->getQuery()->copy());
-    }
+      auto variants = pimpl->enumerate_bond_query_variants(bond->getQuery());
+      if (verbose) {
+        std::cout << "[enumerate_variants] bond idx=" << bond->getIdx()
+                  << " query_desc='" << bond->getQuery()->getDescription()
+                  << "' variants=" << variants.size() << std::endl;
+      }
+      if (variants.empty()) {
+        variants.emplace_back(bond->getQuery()->copy());
+      }
 
-    std::vector<const SmartsAnalyzer::Impl::BondQuery *> ptrs;
-    ptrs.reserve(variants.size());
-    for (const auto &v : variants) {
-      ptrs.push_back(v.get());
-    }
+      std::vector<const SmartsAnalyzer::Impl::BondQuery *> ptrs;
+      ptrs.reserve(variants.size());
+      for (const auto &v : variants) {
+        ptrs.push_back(v.get());
+      }
 
-    variant_bond_indices.push_back(bond->getIdx());
-    bond_variant_storage.push_back(std::move(variants));
-    bond_variant_ptrs.push_back(std::move(ptrs));
+      variant_bond_indices.push_back(bond->getIdx());
+      bond_variant_storage.push_back(std::move(variants));
+      bond_variant_ptrs.push_back(std::move(ptrs));
+    }
   }
 
   if (variant_atom_indices.empty() && variant_bond_indices.empty()) {
@@ -1189,6 +1193,14 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
     }
     return false;
   };
+
+  // Preserve recursive SMARTS that contain wildcard/dummy atoms (e.g. [*:3]).
+  // These are often introduced during typing as attachment placeholders and
+  // should remain scoped inside the recursive constraint instead of being
+  // flattened into top-level branches.
+  const auto has_dummy_atom_token = [](const std::string &txt) {
+    return txt.find("[*") != std::string::npos;
+  };
   std::function<std::string(const RDKit::ROMol &, unsigned int, int,
                             std::set<unsigned int> &)>
       serialize_recursive_subtree;
@@ -1254,9 +1266,17 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
       const std::string recursive_smarts =
           inner.substr(open_pos + 1, close_pos - open_pos - 1);
 
-      // Preserve cyclic recursive expressions as "$(...)" to avoid
-      // ring-closure misserialization during flattening.
-      if (has_ring_closure_marker(recursive_smarts)) {
+      // Preserve recursive expressions as "$(...)" when flattening is unsafe
+      // or semantically undesirable:
+      // 1) cyclic recursive SMARTS (ring-closure digits outside brackets),
+      // 2) typed dummy/wildcard atoms (e.g. [*:3]) that should stay local to
+      //    the recursive scope.
+      if (has_ring_closure_marker(recursive_smarts) ||
+          has_dummy_atom_token(recursive_smarts)) {
+        if (verbose && has_dummy_atom_token(recursive_smarts)) {
+          std::cout << "[enumerate_variants] preserving recursive dummy scope: "
+                    << "$(" << recursive_smarts << ")" << std::endl;
+        }
         search_pos = close_pos + 1;
         continue;
       }
@@ -1427,7 +1447,7 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
         }
         if (check && seen.insert(candidate).second) {
           if (verbose) {
-            std::cerr << "[enumerate_variants] candidate='" << candidate << "'"
+            std::cout << "[enumerate_variants] candidate='" << candidate << "'"
                       << std::endl;
           }
           results.push_back(candidate);
@@ -2217,7 +2237,7 @@ std::vector<std::string> perceive_tautomers(
           current = std::make_unique<RDKit::ROMol>(*replaced.front());
           standardized = RDKit::MolToSmarts(*current);
           if (verbose) {
-            std::cerr << "[perceive_tautomers] applied rule '" << rule.before
+            std::cout << "[perceive_tautomers] applied rule '" << rule.before
                       << "' -> '" << rule.after << "' on '" << v << "' => '"
                       << standardized << "'" << std::endl;
           }
@@ -2236,11 +2256,25 @@ std::vector<std::string> perceive_tautomers(
 }  // namespace
 
 std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
-    std::vector<std::string> smarts_list, bool verbose,
-    bool include_x_in_reserialization, bool ignoreValence, bool catchErrors) {
+  std::vector<std::string> smarts_list, bool verbose, bool ignoreValence,
+  bool catchErrors,
+  const StandardSmartsWorkflowOptions &workflow_options,
+    const StandardSmartsLogOptions &log_options) {
   ZoneScopedN("SmartsAnalyzer::generate_all_combos");
   atom_typer::SmartsAnalyzer sa;
   atom_typer::AtomTyper at;
+
+  const auto log_enabled = [&](unsigned int flag) {
+    if (verbose) {
+      return true;
+    }
+    return log_options.enabled && (log_options.flags & flag) != 0u;
+  };
+
+  at.set_debug_level(log_enabled(LogRecanon) ? DebugLevel::Trace
+                                             : DebugLevel::Off);
+  query_reorder::set_comparison_trace_enabled(
+      log_enabled(LogRecanonComparisons));
 
   std::vector<std::vector<std::string>> results;
   std::unordered_map<std::string, std::string> h_merge_cache;
@@ -2258,21 +2292,23 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
         max_amap = amap;
       }
     }
-    if (verbose) {
+    if (log_enabled(LogMapping)) {
       std::cout << "Mapped SMARTS: " << mapped_smarts << std::endl;
     }
 
-    const auto variants =
-        sa.enumerate_variants(mapped_smarts, 1000, verbose, true);
+    const bool enumerate_verbose = log_enabled(LogVariants);
+    const auto variants = sa.enumerate_variants(
+      mapped_smarts, 1000, enumerate_verbose, true,
+      workflow_options.enumerate_bond_order);
 
-    if (verbose) {
+    if (log_enabled(LogSummary)) {
       std::cout << "Generated " << variants.size() << " variants in r1.\n";
     }
     // const auto def = at.get_default_query_embedding();
     int intial_max_amap = max_amap;
     for (const auto &variant : variants) {
       max_amap = intial_max_amap;  // reset max_amap for next iteration
-      if (verbose) {
+      if (log_enabled(LogVariants)) {
         std::cout << ">>> Processing variant: " << variant << std::endl;
       }
       std::string h_merged_smarts;
@@ -2291,12 +2327,13 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
       // }
       std::string extracted_smarts;
       try {
-        extracted_smarts =
-            at.type_atoms_from_smarts(h_merged_smarts, false, max_amap, verbose,
-                                      include_x_in_reserialization);
+        extracted_smarts = at.type_atoms_from_smarts(
+            h_merged_smarts, false, max_amap, log_enabled(LogAtomTyping),
+            workflow_options.include_x_in_reserialization,
+            workflow_options.enumerate_bond_order);
       } catch (const std::exception &e) {
-        if (verbose) {
-          std::cerr << "Error processing variant '" << variant
+        if (log_enabled(LogErrors)) {
+          std::cout << "Error processing variant '" << variant
                     << "': " << e.what() << std::endl;
         }
         if (catchErrors) {
@@ -2307,11 +2344,12 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
                                                // processing fails.
         }
       }
-      if (verbose) {
+      if (log_enabled(LogAtomTyping)) {
         std::cout << ">>> Extracted SMARTS: " << extracted_smarts << std::endl;
       }
-      const auto variants2_taut =
-          sa.enumerate_variants(extracted_smarts, 20000, verbose, false);
+      const auto variants2_taut = sa.enumerate_variants(
+          extracted_smarts, 20000, enumerate_verbose, false,
+          workflow_options.enumerate_bond_order);
       // const auto variants2_taut = perceive_tautomers(variants2, verbose);
 
       bool seen_invalid = false;
@@ -2340,19 +2378,20 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
           if (vc_it != valence_cache.end()) {
             valence_ok = vc_it->second;
           } else {
-            valence_ok = at.is_valid_valence_smarts(v2, verbose);
+            valence_ok =
+                at.is_valid_valence_smarts(v2, log_enabled(LogValidation));
             valence_cache.emplace(v2, valence_ok);
           }
         }
 
         if (valence_ok) {
-          if (verbose) {
+          if (log_enabled(LogValidation)) {
             std::cout << "\t" << v2 << std::endl;
           }
           // these_results.push_back(v2);
           these_results_split.push_back(v2);
         } else {
-          if (verbose) {
+          if (log_enabled(LogValidation)) {
             std::cout << "  Invalid valence SMARTS: " << v2 << std::endl;
           }
           if (ignoreValence) {
@@ -2362,15 +2401,34 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
           seen_invalid = true;
         }
       }
+
+      std::vector<std::string> removed_recursive_maps_consolidation;
+      for (const auto &s : these_results_split) {
+        std::string removed_map = remove_recursive_expression_atom_maps(s);
+        if (removed_recursive_maps_consolidation.empty() ||
+            std::find(removed_recursive_maps_consolidation.begin(),
+                      removed_recursive_maps_consolidation.end(),
+                      removed_map) ==
+                removed_recursive_maps_consolidation.end()) {
+          removed_recursive_maps_consolidation.push_back(removed_map);
+        }
+      }
+
+      std::vector<std::string> first_consolidation =
+          at.consolidate_smarts_by_atom_maps_recanon(removed_recursive_maps_consolidation);
+
       std::string final_smarts = at.consolidate_smarts_with_recursive_paths(
-          at.consolidate_smarts_by_atom_maps(these_results_split));
+          first_consolidation);
       these_results.push_back(final_smarts);
-      if (verbose) {
+      if (log_enabled(LogFinal)) {
+        for (const auto &s : first_consolidation) {
+          std::cout << "\t[first_consolidation] " << s << std::endl;
+        }
         std::cout << " split console: " << final_smarts << std::endl;
       }
     }
-    if (verbose) {
-      std::cout << "<<< " << std::endl;
+    if (log_enabled(LogSummary)) {
+      std::cout << "<<<<<<<<<<<<<<<<<<<<<<<<\n\n " << std::endl;
       std::cout << "\t" << std::endl;
     }
     results.push_back(std::move(these_results));
@@ -2378,15 +2436,36 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
   return results;
 }
 
+std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
+  std::vector<std::string> smarts_list, bool verbose,
+  bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
+  const StandardSmartsLogOptions &log_options) {
+  StandardSmartsWorkflowOptions workflow_options;
+  workflow_options.include_x_in_reserialization =
+    include_x_in_reserialization;
+  return generate_all_combos(smarts_list, verbose, ignoreValence, catchErrors,
+               workflow_options, log_options);
+}
+
 std::vector<std::string> SmartsAnalyzer::standard_smarts(
     const std::vector<std::string> &smarts_list, bool verbose,
-    bool include_x_in_reserialization, bool ignoreValence, bool catchErrors) {
+  bool ignoreValence, bool catchErrors,
+  const StandardSmartsWorkflowOptions &workflow_options,
+    const StandardSmartsLogOptions &log_options) {
   ZoneScopedN("SmartsAnalyzer::standard_smarts");
   atom_typer::SmartsAnalyzer sa;
   atom_typer::AtomTyper at;
+
+  const auto log_enabled = [&](unsigned int flag) {
+    if (verbose) {
+      return true;
+    }
+    return log_options.enabled && (log_options.flags & flag) != 0u;
+  };
+
   std::vector<std::vector<std::string>> results =
-      sa.generate_all_combos(smarts_list, verbose, include_x_in_reserialization,
-                             ignoreValence, catchErrors);
+      sa.generate_all_combos(smarts_list, verbose, ignoreValence, catchErrors,
+                 workflow_options, log_options);
 
   int idx = 0;
   std::vector<std::string> out;
@@ -2405,7 +2484,7 @@ std::vector<std::string> SmartsAnalyzer::standard_smarts(
     //     std::cout << "Post H-merge: " << h_merged_smarts << std::endl;
     //   }
     // }
-    if (verbose) {
+    if (log_enabled(LogSummary) || log_enabled(LogFinal)) {
       std::cout << ">>> input: " << this_smarts << std::endl;
       for (const auto &s : res) {
         std::cout << "\t" << s << std::endl;
@@ -2457,6 +2536,12 @@ std::vector<std::string> SmartsAnalyzer::standard_smarts(
       preferred = res;
     }
 
+    for (const auto &s : preferred) {
+      if (log_enabled(LogSummary) || log_enabled(LogFinal)) {
+        std::cout << "\t [preferred] " << s << std::endl;
+      }
+    }
+
     std::string final_smarts =
         at.consolidate_smarts_with_recursive_paths(preferred);
     // if (max_mapped_atoms > 0 &&
@@ -2480,14 +2565,25 @@ std::vector<std::string> SmartsAnalyzer::standard_smarts(
     // }
     final_smarts = remove_recursive_expression_atom_maps(final_smarts);
 
-    if (verbose) {
+    if (log_enabled(LogFinal)) {
       // std::cout << "Input SMARTS: " << this_smarts << std::endl;
       //   std::cout << "Generated " << res.size() << " variants:\n";
-      std::cout << "\t" << final_smarts << std::endl;
+      std::cout << "\t[final] " << final_smarts << std::endl;
       std::cout << std::endl;
     }
     out.push_back(final_smarts);
   }
   return out;
+}
+
+std::vector<std::string> SmartsAnalyzer::standard_smarts(
+  const std::vector<std::string> &smarts_list, bool verbose,
+  bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
+  const StandardSmartsLogOptions &log_options) {
+  StandardSmartsWorkflowOptions workflow_options;
+  workflow_options.include_x_in_reserialization =
+    include_x_in_reserialization;
+  return standard_smarts(smarts_list, verbose, ignoreValence, catchErrors,
+             workflow_options, log_options);
 }
 }  // namespace atom_typer
