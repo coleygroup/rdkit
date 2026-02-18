@@ -793,8 +793,8 @@ class SmartsAnalyzer::Impl {
     return out;
   }
 
-  RDKit::QueryAtom *hoist_recursive_anchor_primitives_for_and_query(const RDKit::QueryAtom *qa,
-                                                  bool verbose = false) {
+  RDKit::QueryAtom *hoist_recursive_anchor_primitives_for_and_query(
+      const RDKit::QueryAtom *qa, bool verbose = false) {
     if (!qa || !qa->getQuery()) {
       return nullptr;
     }
@@ -813,8 +813,7 @@ class SmartsAnalyzer::Impl {
         return "";
       }
       std::string sig = q->getDescription();
-      const auto *eq =
-          dynamic_cast<const RDKit::ATOM_EQUALS_QUERY *>(q);
+      const auto *eq = dynamic_cast<const RDKit::ATOM_EQUALS_QUERY *>(q);
       if (eq) {
         sig += "=" + std::to_string(eq->getVal());
       }
@@ -837,6 +836,10 @@ class SmartsAnalyzer::Impl {
     // those inside nested AND/OR sub-trees) for dedup so we don't hoist a
     // primitive that already appears somewhere in the query.
     std::set<std::string> existing_sigs;
+    // Also collect atomic numbers present in the outer query (from
+    // AtomAtomicNum or AtomType) so that we can suppress hoisting an
+    // AtomType whose atomic number is already constrained.
+    std::set<int> existing_atomic_nums;
     std::function<void(const AtomQuery *)> collect_existing_sigs;
     collect_existing_sigs = [&](const AtomQuery *node) {
       if (!node) {
@@ -848,6 +851,16 @@ class SmartsAnalyzer::Impl {
       // For leaf nodes (no children), record their signature.
       if (node->beginChildren() == node->endChildren()) {
         existing_sigs.insert(query_signature(node));
+        // Track atomic numbers from AtomAtomicNum and AtomType leaves.
+        const auto *eq = dynamic_cast<const RDKit::ATOM_EQUALS_QUERY *>(node);
+        if (eq) {
+          const std::string &d = node->getDescription();
+          if (d == "AtomAtomicNum") {
+            existing_atomic_nums.insert(eq->getVal());
+          } else if (d == "AtomType") {
+            existing_atomic_nums.insert(eq->getVal() & 0xFF);
+          }
+        }
         return;
       }
       // For composite nodes, recurse into children.
@@ -863,6 +876,11 @@ class SmartsAnalyzer::Impl {
          it != original_query->endChildren(); ++it) {
       const auto *child = it->get();
       if (!child || child->getDescription() != "RecursiveStructure") {
+        continue;
+      }
+      // Do not hoist from negated recursive expressions: !$(C=X) does NOT
+      // imply the atom is C; it only means the atom doesn't match C=X.
+      if (child->getNegation()) {
         continue;
       }
 
@@ -888,8 +906,28 @@ class SmartsAnalyzer::Impl {
 
       const std::string sig = query_signature(anchor_q);
       if (!existing_sigs.count(sig)) {
-        hoisted.emplace_back(anchor_q->copy());
-        existing_sigs.insert(sig);
+        // Also suppress hoisting if the anchor's atomic number is already
+        // constrained in the outer query (e.g. outer has #6 / AtomAtomicNum=6,
+        // anchor is C / AtomType encoding atomic_num=6).
+        bool redundant = false;
+        const auto *anchor_eq =
+            dynamic_cast<const RDKit::ATOM_EQUALS_QUERY *>(anchor_q);
+        if (anchor_eq && !anchor_q->getNegation()) {
+          const std::string &adesc = anchor_q->getDescription();
+          int anchor_anum = -1;
+          if (adesc == "AtomAtomicNum") {
+            anchor_anum = anchor_eq->getVal();
+          } else if (adesc == "AtomType") {
+            anchor_anum = anchor_eq->getVal() & 0xFF;
+          }
+          if (anchor_anum > 0 && existing_atomic_nums.count(anchor_anum)) {
+            redundant = true;
+          }
+        }
+        if (!redundant) {
+          hoisted.emplace_back(anchor_q->copy());
+          existing_sigs.insert(sig);
+        }
       }
     }
 
@@ -914,10 +952,9 @@ class SmartsAnalyzer::Impl {
       new_token.setQuery(new_and->copy());
       std::cout << "[enumerate_variants] hoisted recursive-anchor primitive "
                 << "atom idx=" << qa->getIdx() << " token='"
-                << RDKit::SmartsWrite::GetAtomSmarts(qa)
-                << "' -> '"
-                << RDKit::SmartsWrite::GetAtomSmarts(&new_token)
-                << "'" << std::endl;
+                << RDKit::SmartsWrite::GetAtomSmarts(qa) << "' -> '"
+                << RDKit::SmartsWrite::GetAtomSmarts(&new_token) << "'"
+                << std::endl;
     }
 
     auto *result = new RDKit::QueryAtom();
@@ -954,9 +991,9 @@ class SmartsAnalyzer::Impl {
     std::function<ScanResult(const AtomQuery *,
                              std::vector<AtomQuery::CHILD_TYPE> &)>
         scan_and_collect;
-    scan_and_collect = [&](const AtomQuery *node,
-                           std::vector<AtomQuery::CHILD_TYPE> &remaining_out)
-        -> ScanResult {
+    scan_and_collect =
+        [&](const AtomQuery *node,
+            std::vector<AtomQuery::CHILD_TYPE> &remaining_out) -> ScanResult {
       ScanResult sr;
       for (auto it = node->beginChildren(); it != node->endChildren(); ++it) {
         const auto *child = it->get();
@@ -966,8 +1003,7 @@ class SmartsAnalyzer::Impl {
         const std::string &desc = child->getDescription();
 
         if (desc == "AtomAtomicNum" && !child->getNegation()) {
-          const auto *eq =
-              static_cast<const RDKit::ATOM_EQUALS_QUERY *>(child);
+          const auto *eq = static_cast<const RDKit::ATOM_EQUALS_QUERY *>(child);
           const int val = eq->getVal();
           if (val > 0 && !sr.has_atomic_num) {
             sr.atomic_num = val;
@@ -1305,8 +1341,8 @@ SmartsAnalyzer::~SmartsAnalyzer() = default;
  * Find the vector of all strings of SMARTS variants w/ max
  */
 std::vector<std::string> SmartsAnalyzer::enumerate_variants(
-  const std::string &smarts, int max, bool verbose, bool carry_atom_maps,
-  bool enumerate_bond_order) {
+    const std::string &smarts, int max, bool verbose, bool carry_atom_maps,
+    bool enumerate_bond_order) {
   ZoneScopedN("SmartsAnalyzer::enumerate_variants");
   std::vector<std::string> results;
   if (verbose) {
@@ -1317,7 +1353,7 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
   if (smarts.empty() || max <= 0) {
     return results;
   }
-
+  // std::cout << "here ! " << smarts << std::endl;
   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmartsToMol(smarts));
 
   if (!mol) {
@@ -1355,26 +1391,41 @@ std::vector<std::string> SmartsAnalyzer::enumerate_variants(
 
     std::unique_ptr<RDKit::QueryAtom> query_for_variant_enumeration(
         pimpl->hoist_recursive_anchor_primitives_for_and_query(qatom, verbose));
-    if (verbose){
-      std::cout << "[hoist_recursive_anchor_primitives_for_and_query_pre] " << RDKit::SmartsWrite::GetAtomSmarts(qatom) << "\n";
-      const std::string ve_atom = query_for_variant_enumeration ? RDKit::SmartsWrite::GetAtomSmarts(query_for_variant_enumeration.get()) : "None";
-      std::cout << "[hoist_recursive_anchor_primitives_for_and_query] " << ve_atom << "\n";
+    if (verbose) {
+      std::cout << "[hoist_recursive_anchor_primitives_for_and_query_pre] "
+                << RDKit::SmartsWrite::GetAtomSmarts(qatom) << "\n";
+      const std::string ve_atom = query_for_variant_enumeration
+                                      ? RDKit::SmartsWrite::GetAtomSmarts(
+                                            query_for_variant_enumeration.get())
+                                      : "None";
+      std::cout << "[hoist_recursive_anchor_primitives_for_and_query] "
+                << ve_atom << "\n";
     }
     const auto *norm_input = query_for_variant_enumeration
-        ? query_for_variant_enumeration.get() : qatom;
+                                 ? query_for_variant_enumeration.get()
+                                 : qatom;
     std::unique_ptr<RDKit::QueryAtom> query_for_symbol_normalization(
-        pimpl->normalize_atomicnum_arom_aliphatic_and_query(norm_input, verbose));
-    if (verbose){
-      const std::string sn_atom = query_for_symbol_normalization ? RDKit::SmartsWrite::GetAtomSmarts(query_for_symbol_normalization.get()) : "None";
-      std::cout << "[normalize_atomicnum_arom_aliphatic_and_query] " << sn_atom << "\n";
+        pimpl->normalize_atomicnum_arom_aliphatic_and_query(norm_input,
+                                                            verbose));
+    if (verbose) {
+      const std::string sn_atom =
+          query_for_symbol_normalization
+              ? RDKit::SmartsWrite::GetAtomSmarts(
+                    query_for_symbol_normalization.get())
+              : "None";
+      std::cout << "[normalize_atomicnum_arom_aliphatic_and_query] " << sn_atom
+                << "\n";
     }
     const SmartsAnalyzer::Impl::AtomQuery *variant_query =
-        query_for_symbol_normalization && query_for_symbol_normalization->getQuery()
+        query_for_symbol_normalization &&
+                query_for_symbol_normalization->getQuery()
             ? query_for_symbol_normalization->getQuery()
-            : (query_for_variant_enumeration && query_for_variant_enumeration->getQuery()
-                 ? query_for_variant_enumeration->getQuery()
-                 : qatom->getQuery());
-    auto variants = pimpl->enumerate_query_variants(variant_query, carry_atom_maps);
+            : (query_for_variant_enumeration &&
+                       query_for_variant_enumeration->getQuery()
+                   ? query_for_variant_enumeration->getQuery()
+                   : qatom->getQuery());
+    auto variants =
+        pimpl->enumerate_query_variants(variant_query, carry_atom_maps);
     if (verbose) {
       std::cout << "[enumerate_variants] atom idx=" << atom->getIdx()
                 << " query_desc='" << qatom->getQuery()->getDescription()
@@ -2252,21 +2303,40 @@ std::string remove_recursive_expression_atom_maps(const std::string &smarts) {
 // For each atom in a SMARTS molecule, look for OR nodes in the query tree
 // whose children (AND-terms) share a common primitive type (e.g.
 // AtomHCount) across every alternative.  When removing that primitive
-// leaves identical residuals for every value, the OR is factored:
+// leaves identical residuals for every value, the OR is factored.
 //
-//   OR(A&H0, A&H1, B&H0, B&H1)  →  AND( OR(H0,H1), OR(A,B) )
+// This version:
+//  1) Flattens nested OR nodes into a single list of alternatives.
+//  2) Separates alternatives into factorable (all-leaves) vs unfactorable
+//     (containing RecursiveStructure / NOT / sub-OR).
+//  3) Groups factorable terms by residual and factors per-group — groups
+//     with only one term are left as-is rather than blocking the whole OR.
 //
-// This is semantically equivalent and produces shorter, more readable
-// SMARTS strings.
+//   OR(+&D1&H0, +&D1&H1, +&D2&H0, +&D2&H1)
+//     →  OR( AND(OR(H0,H1), +, D1),  AND(OR(H0,H1), +, D2) )
 // ---------------------------------------------------------------------------
-std::string factor_or_common_primitives(const std::string &smarts) {
+std::string factor_or_common_primitives(const std::string &smarts,
+                                        bool verbose) {
   using AtomQuery = Queries::Query<int, const RDKit::Atom *, true>;
+
+  if (verbose) {
+    std::cout << "\n===== factor_or_common_primitives =====\n"
+              << "  input SMARTS: " << smarts << "\n";
+  }
 
   const auto is_and = [](const std::string &d) {
     return d == "AtomAnd" || d == "And";
   };
   const auto is_or = [](const std::string &d) {
     return d == "AtomOr" || d == "Or";
+  };
+
+  // Helper: render a query sub-tree as a SMARTS atom expression.
+  const auto query_to_smarts_str = [](const AtomQuery *q) -> std::string {
+    if (!q) return "(null)";
+    RDKit::QueryAtom tmp;
+    tmp.setQuery(q->copy());
+    return RDKit::SmartsWrite::GetAtomSmarts(&tmp);
   };
 
   // Leaf-primitive signature for structural comparison.
@@ -2282,6 +2352,7 @@ std::string factor_or_common_primitives(const std::string &smarts) {
     bool operator==(const PrimSig &o) const {
       return desc == o.desc && val == o.val && neg == o.neg;
     }
+    bool operator!=(const PrimSig &o) const { return !(*this == o); }
   };
 
   // Leaf data: signature + pointer to original query node (for cloning).
@@ -2295,8 +2366,7 @@ std::string factor_or_common_primitives(const std::string &smarts) {
   // (RecursiveStructure, NOT, nested OR).
   std::function<bool(const AtomQuery *, std::vector<LeafInfo> &)>
       collect_leaves;
-  collect_leaves = [&](const AtomQuery *q,
-                       std::vector<LeafInfo> &out) -> bool {
+  collect_leaves = [&](const AtomQuery *q, std::vector<LeafInfo> &out) -> bool {
     if (!q) return false;
     const std::string &d = q->getDescription();
     if (is_and(d)) {
@@ -2305,8 +2375,7 @@ std::string factor_or_common_primitives(const std::string &smarts) {
       }
       return true;
     }
-    if (is_or(d) || d == "RecursiveStructure" || d == "AtomNot" ||
-        d == "Not") {
+    if (is_or(d) || d == "RecursiveStructure" || d == "AtomNot" || d == "Not") {
       return false;
     }
     const auto *eq = dynamic_cast<const RDKit::ATOM_EQUALS_QUERY *>(q);
@@ -2315,163 +2384,450 @@ std::string factor_or_common_primitives(const std::string &smarts) {
     return true;
   };
 
-  // Try to factor an OR node by extracting a common primitive type.
-  // Returns a new query (caller owns) or nullptr if nothing was factored.
-  auto try_factor = [&](const AtomQuery *or_node) -> AtomQuery * {
-    // Collect leaf info for each OR term.
-    std::vector<std::vector<LeafInfo>> terms;
-    for (auto it = or_node->beginChildren(); it != or_node->endChildren();
-         ++it) {
-      std::vector<LeafInfo> leaves;
-      if (!collect_leaves(it->get(), leaves)) return nullptr;
-      if (leaves.empty()) return nullptr;
-      std::sort(leaves.begin(), leaves.end(),
-                [](const LeafInfo &a, const LeafInfo &b) {
-                  return a.sig < b.sig;
-                });
-      terms.push_back(std::move(leaves));
+  // Recursively flatten nested ORs into a single list of leaf alternatives.
+  std::function<void(const AtomQuery *, std::vector<const AtomQuery *> &)>
+      flatten_or;
+  flatten_or = [&](const AtomQuery *q, std::vector<const AtomQuery *> &out) {
+    if (!q) return;
+    if (is_or(q->getDescription())) {
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+        flatten_or(it->get(), out);
+      }
+    } else {
+      out.push_back(q);
     }
-    if (terms.size() < 2) return nullptr;
+  };
 
-    // Primitive descriptions that appear exactly once in every term.
-    std::set<std::string> candidates;
-    for (const auto &l : terms[0]) candidates.insert(l.sig.desc);
-    for (size_t i = 1; i < terms.size(); ++i) {
-      std::set<std::string> here;
-      for (const auto &l : terms[i]) here.insert(l.sig.desc);
-      std::set<std::string> common;
-      std::set_intersection(candidates.begin(), candidates.end(),
-                            here.begin(), here.end(),
-                            std::inserter(common, common.begin()));
-      candidates = std::move(common);
+  // ------------------------------------------------------------------
+  // try_factor — attempt per-group factoring of an OR node.
+  // Returns a new query (caller owns) or nullptr if nothing was factored.
+  // ------------------------------------------------------------------
+  auto try_factor = [&](const AtomQuery *or_node) -> AtomQuery * {
+    // ---- Step 1: Flatten nested ORs ----
+    std::vector<const AtomQuery *> flat_terms;
+    flatten_or(or_node, flat_terms);
+
+    if (verbose) {
+      std::cout << "  try_factor: " << flat_terms.size()
+                << " flat alternatives after OR-flattening\n";
+      for (size_t i = 0; i < flat_terms.size(); ++i) {
+        std::cout << "    [" << i << "] (" << flat_terms[i]->getDescription()
+                  << ") " << query_to_smarts_str(flat_terms[i]) << "\n";
+      }
     }
-    // Drop any description with count != 1 in some term.
-    for (auto cit = candidates.begin(); cit != candidates.end();) {
-      bool ok = true;
-      for (const auto &term : terms) {
-        int cnt = 0;
-        for (const auto &l : term) {
-          if (l.sig.desc == *cit) ++cnt;
+
+    if (flat_terms.size() < 2) {
+      if (verbose) std::cout << "    < 2 flat terms, nothing to factor\n";
+      return nullptr;
+    }
+
+    // ---- Step 2: Separate factorable vs unfactorable terms ----
+    struct TermData {
+      std::vector<LeafInfo> leaves;  // sorted by sig
+      const AtomQuery *original;
+    };
+    std::vector<TermData> factorable;
+    std::vector<const AtomQuery *> unfactorable;
+
+    for (size_t i = 0; i < flat_terms.size(); ++i) {
+      TermData td;
+      td.original = flat_terms[i];
+      if (collect_leaves(flat_terms[i], td.leaves) && !td.leaves.empty()) {
+        std::sort(
+            td.leaves.begin(), td.leaves.end(),
+            [](const LeafInfo &a, const LeafInfo &b) { return a.sig < b.sig; });
+        factorable.push_back(std::move(td));
+        if (verbose) {
+          std::cout << "      term " << i << " -> factorable, "
+                    << factorable.back().leaves.size() << " leaves: {";
+          for (const auto &l : factorable.back().leaves)
+            std::cout << " " << l.sig.desc << "=" << l.sig.val;
+          std::cout << " }\n";
         }
-        if (cnt != 1) {
+      } else {
+        unfactorable.push_back(flat_terms[i]);
+        if (verbose) {
+          std::cout << "      term " << i
+                    << " -> unfactorable (recursive/NOT/sub-OR), kept as-is\n";
+        }
+      }
+    }
+
+    if (factorable.size() < 2) {
+      if (verbose) std::cout << "    < 2 factorable terms, nothing to factor\n";
+      return nullptr;
+    }
+
+    // ---- Step 3: Find candidate primitive types ----
+    // A candidate must: (a) appear in at least 2 factorable terms,
+    // (b) have at most 1 occurrence per term, (c) have 2+ distinct values.
+    std::map<std::string, std::set<int>> prim_vals;  // desc -> values seen
+    std::map<std::string, size_t>
+        prim_term_count;  // desc -> # terms containing it
+    for (const auto &td : factorable) {
+      std::map<std::string, int> counts;
+      for (const auto &l : td.leaves) {
+        counts[l.sig.desc]++;
+        prim_vals[l.sig.desc].insert(l.sig.val);
+      }
+      for (const auto &[d, c] : counts) {
+        if (c == 1) prim_term_count[d]++;
+      }
+    }
+
+    std::vector<std::string> candidates;
+    for (const auto &[desc, vals] : prim_vals) {
+      if (vals.size() < 2 || prim_term_count[desc] < 2) continue;
+      // Verify exactly-one-per-term for every term that has it:
+      bool ok = true;
+      for (const auto &td : factorable) {
+        int cnt = 0;
+        for (const auto &l : td.leaves)
+          if (l.sig.desc == desc) ++cnt;
+        if (cnt > 1) {
           ok = false;
           break;
         }
       }
-      if (!ok)
-        cit = candidates.erase(cit);
-      else
-        ++cit;
+      if (ok) candidates.push_back(desc);
     }
 
-    // Try each candidate primitive description.
-    for (const auto &cand : candidates) {
-      // Group terms by the candidate's value; compute residual sigs.
-      struct ResidualInfo {
-        std::vector<PrimSig> sigs;           // sorted
-        std::vector<const AtomQuery *> nodes;  // parallel to sigs
-      };
-      std::map<int, std::vector<ResidualInfo>> val_groups;
-      std::map<int, const AtomQuery *> val_nodes;
+    if (verbose) {
+      std::cout << "    candidate primitives to factor: {";
+      for (const auto &c : candidates)
+        std::cout << " " << c << "(" << prim_vals[c].size() << " vals)";
+      std::cout << " }\n";
+    }
+    if (candidates.empty()) {
+      if (verbose) std::cout << "    no candidates, nothing to factor\n";
+      return nullptr;
+    }
 
-      for (const auto &term : terms) {
+    // ---- Step 4: Score each candidate by term reduction ----
+    // For each candidate, group factorable terms by residual (all prims
+    // except the candidate). Groups with 2+ terms can be factored.
+    // Reduction = sum over groups of (group_size - 1) for groups with 2+.
+
+    struct GroupEntry {
+      int cand_val;
+      size_t term_idx;  // index into `factorable`
+      const AtomQuery *cand_node;
+    };
+    struct ResidualGroup {
+      std::vector<PrimSig> residual_sigs;
+      std::vector<GroupEntry> entries;
+    };
+
+    std::string best_cand;
+    int best_reduction = 0;
+
+    for (const auto &cand : candidates) {
+      std::map<std::vector<PrimSig>, ResidualGroup> groups;
+      size_t terms_without = 0;
+
+      for (size_t i = 0; i < factorable.size(); ++i) {
+        const auto &td = factorable[i];
+        bool found = false;
         int val = 0;
         const AtomQuery *cand_node = nullptr;
-        ResidualInfo ri;
-        for (const auto &l : term) {
-          if (l.sig.desc == cand && !cand_node) {
+        std::vector<PrimSig> residual;
+        for (const auto &l : td.leaves) {
+          if (l.sig.desc == cand && !found) {
             val = l.sig.val;
             cand_node = l.node;
+            found = true;
           } else {
-            ri.sigs.push_back(l.sig);
-            ri.nodes.push_back(l.node);
+            residual.push_back(l.sig);
           }
         }
-        std::sort(ri.sigs.begin(), ri.sigs.end());
-        val_groups[val].push_back(std::move(ri));
-        val_nodes[val] = cand_node;
-      }
-
-      const size_t n_vals = val_groups.size();
-      if (n_vals < 2) continue;
-
-      // Sort each group's residuals for comparison.
-      for (auto &[v, res_list] : val_groups) {
-        std::sort(res_list.begin(), res_list.end(),
-                  [](const ResidualInfo &a, const ResidualInfo &b) {
-                    return a.sigs < b.sigs;
-                  });
-      }
-
-      // All value groups must have the same residual set.
-      const auto &first_group = val_groups.begin()->second;
-      bool all_same = true;
-      for (auto git = std::next(val_groups.begin());
-           git != val_groups.end(); ++git) {
-        if (git->second.size() != first_group.size()) {
-          all_same = false;
-          break;
+        if (!found) {
+          ++terms_without;
+          continue;
         }
-        for (size_t i = 0; i < first_group.size(); ++i) {
-          if (git->second[i].sigs != first_group[i].sigs) {
-            all_same = false;
-            break;
+        std::sort(residual.begin(), residual.end());
+        auto &g = groups[residual];
+        g.residual_sigs = residual;
+        g.entries.push_back({val, i, cand_node});
+      }
+
+      int reduction = 0;
+      for (const auto &[res, grp] : groups) {
+        if (grp.entries.size() >= 2) {
+          // Count distinct values in this group.
+          std::set<int> vals;
+          for (const auto &e : grp.entries) vals.insert(e.cand_val);
+          if (vals.size() >= 2) {
+            // N terms collapse to 1; reduction = N - 1
+            reduction += static_cast<int>(grp.entries.size()) - 1;
           }
         }
-        if (!all_same) break;
-      }
-      if (!all_same) continue;
-
-      const size_t n_residuals = first_group.size();
-      // Sanity: #terms must equal #vals × #residuals.
-      if (terms.size() != n_vals * n_residuals) continue;
-      // Only factor when it actually reduces the number of terms.
-      if (n_vals + n_residuals >= terms.size()) continue;
-
-      // ---- Build the factored query tree ----
-
-      // OR of the factored primitive values.
-      auto *or_vals = new RDKit::ATOM_OR_QUERY;
-      or_vals->setDescription("AtomOr");
-      for (const auto &[v, nd] : val_nodes) {
-        or_vals->addChild(AtomQuery::CHILD_TYPE(nd->copy()));
       }
 
-      // Single residual: AND(OR_vals, leaf…)
-      if (n_residuals == 1) {
-        auto *result = new RDKit::ATOM_AND_QUERY;
-        result->setDescription("AtomAnd");
-        result->addChild(AtomQuery::CHILD_TYPE(or_vals));
-        for (const auto *n : first_group[0].nodes) {
-          result->addChild(AtomQuery::CHILD_TYPE(n->copy()));
-        }
-        return result;
-      }
-
-      // Multiple residuals: AND(OR_vals, OR_residuals)
-      auto *or_residuals = new RDKit::ATOM_OR_QUERY;
-      or_residuals->setDescription("AtomOr");
-      for (const auto &res : first_group) {
-        if (res.nodes.size() == 1) {
-          or_residuals->addChild(
-              AtomQuery::CHILD_TYPE(res.nodes[0]->copy()));
-        } else {
-          auto *and_node = new RDKit::ATOM_AND_QUERY;
-          and_node->setDescription("AtomAnd");
-          for (const auto *n : res.nodes) {
-            and_node->addChild(AtomQuery::CHILD_TYPE(n->copy()));
-          }
-          or_residuals->addChild(AtomQuery::CHILD_TYPE(and_node));
+      if (verbose) {
+        std::cout << "    candidate '" << cand << "': " << groups.size()
+                  << " residual groups, " << terms_without
+                  << " terms without, reduction=" << reduction << "\n";
+        for (const auto &[res, grp] : groups) {
+          std::cout << "      group {";
+          for (const auto &s : res) std::cout << " " << s.desc << "=" << s.val;
+          std::cout << " } -> " << grp.entries.size() << " terms, vals={";
+          for (const auto &e : grp.entries) std::cout << " " << e.cand_val;
+          std::cout << " }\n";
         }
       }
 
-      auto *result = new RDKit::ATOM_AND_QUERY;
-      result->setDescription("AtomAnd");
-      result->addChild(AtomQuery::CHILD_TYPE(or_vals));
-      result->addChild(AtomQuery::CHILD_TYPE(or_residuals));
-      return result;
+      if (reduction > best_reduction) {
+        best_reduction = reduction;
+        best_cand = cand;
+      }
     }
-    return nullptr;
+
+    if (best_reduction == 0) {
+      if (verbose)
+        std::cout << "    no candidate yields a reduction, nothing to factor\n";
+      return nullptr;
+    }
+
+    if (verbose) {
+      std::cout << "    >>> best candidate: '" << best_cand
+                << "' with reduction=" << best_reduction << "\n";
+    }
+
+    // ---- Step 5: Build the factored OR using the best candidate ----
+    // Recompute groups for the best candidate.
+    std::map<std::vector<PrimSig>, ResidualGroup> groups;
+    std::vector<size_t> terms_without;  // factorable indices without cand
+
+    for (size_t i = 0; i < factorable.size(); ++i) {
+      const auto &td = factorable[i];
+      bool found = false;
+      int val = 0;
+      const AtomQuery *cand_node = nullptr;
+      std::vector<PrimSig> residual;
+      for (const auto &l : td.leaves) {
+        if (l.sig.desc == best_cand && !found) {
+          val = l.sig.val;
+          cand_node = l.node;
+          found = true;
+        } else {
+          residual.push_back(l.sig);
+        }
+      }
+      if (!found) {
+        terms_without.push_back(i);
+        continue;
+      }
+      std::sort(residual.begin(), residual.end());
+      auto &g = groups[residual];
+      g.residual_sigs = residual;
+      g.entries.push_back({val, i, cand_node});
+    }
+
+    // Build the new OR.
+    auto *new_or = new RDKit::ATOM_OR_QUERY;
+    new_or->setDescription("AtomOr");
+
+    for (auto &[res_sigs, grp] : groups) {
+      // Count distinct values.
+      std::set<int> vals;
+      for (const auto &e : grp.entries) vals.insert(e.cand_val);
+
+      if (grp.entries.size() >= 2 && vals.size() >= 2) {
+        // Factor this group: AND( OR(cand_vals…), residual… )
+        // Deduplicate candidate values (keep first node per value).
+        std::map<int, const AtomQuery *> val_to_node;
+        for (const auto &e : grp.entries) {
+          if (val_to_node.find(e.cand_val) == val_to_node.end())
+            val_to_node[e.cand_val] = e.cand_node;
+        }
+
+        // Get residual leaf nodes from the first entry.
+        const auto &first_term = factorable[grp.entries[0].term_idx];
+        std::vector<const AtomQuery *> residual_nodes;
+        for (const auto &l : first_term.leaves) {
+          if (l.sig.desc != best_cand) {
+            residual_nodes.push_back(l.node);
+          }
+        }
+
+        // --- Simplify the factored primitive OR ---
+        // Universe = all distinct values seen for best_cand across
+        // ALL factorable terms.
+        const auto &universe = prim_vals[best_cand];
+
+        enum class SimplifyMode {
+          kKeepOr,
+          kDropEntirely,
+          kNegate
+        };
+        SimplifyMode mode = SimplifyMode::kKeepOr;
+        int missing_val = 0;
+
+        if (vals.size() == universe.size()) {
+          // Group covers every value that appears anywhere → tautology.
+          mode = SimplifyMode::kDropEntirely;
+          if (verbose) {
+            std::cout << "    simplify: " << best_cand
+                      << " covers full universe (" << universe.size()
+                      << " vals) -> dropping\n";
+          }
+        } else if (vals.size() + 1 == universe.size()) {
+          // Group covers all-but-one → negate the missing value.
+          for (int uv : universe) {
+            if (vals.find(uv) == vals.end()) {
+              missing_val = uv;
+              break;
+            }
+          }
+          mode = SimplifyMode::kNegate;
+          if (verbose) {
+            std::cout << "    simplify: " << best_cand
+                      << " covers universe-1 -> !(" << best_cand << "="
+                      << missing_val << ")\n";
+          }
+        }
+
+        AtomQuery *and_node = nullptr;
+        if (mode == SimplifyMode::kDropEntirely) {
+          // No constraint on the candidate primitive — just residuals.
+          if (residual_nodes.empty()) {
+            // No residuals and candidate covers full universe → tautology.
+            // Use a null query (matches any atom).
+            and_node = RDKit::makeAtomNullQuery();
+          } else if (residual_nodes.size() == 1) {
+            // Single residual, no AND wrapper needed.
+            and_node = residual_nodes[0]->copy();
+          } else {
+            auto *a = new RDKit::ATOM_AND_QUERY;
+            a->setDescription("AtomAnd");
+            for (const auto *n : residual_nodes) {
+              a->addChild(AtomQuery::CHILD_TYPE(n->copy()));
+            }
+            and_node = a;
+          }
+        } else if (mode == SimplifyMode::kNegate) {
+          // Replace OR(vals…) with a single negated primitive.
+          // Clone one of the existing nodes to get the right query type,
+          // then set its value and negation.
+          auto *neg_prim = static_cast<RDKit::ATOM_EQUALS_QUERY *>(
+              val_to_node.begin()->second->copy());
+          neg_prim->setVal(missing_val);
+          neg_prim->setNegation(true);
+
+          if (residual_nodes.empty()) {
+            // No residuals — just the negated primitive, no AND wrapper.
+            and_node = neg_prim;
+          } else if (residual_nodes.size() == 1) {
+            auto *a = new RDKit::ATOM_AND_QUERY;
+            a->setDescription("AtomAnd");
+            a->addChild(AtomQuery::CHILD_TYPE(neg_prim));
+            a->addChild(AtomQuery::CHILD_TYPE(residual_nodes[0]->copy()));
+            and_node = a;
+          } else {
+            auto *a = new RDKit::ATOM_AND_QUERY;
+            a->setDescription("AtomAnd");
+            a->addChild(AtomQuery::CHILD_TYPE(neg_prim));
+            for (const auto *n : residual_nodes) {
+              a->addChild(AtomQuery::CHILD_TYPE(n->copy()));
+            }
+            and_node = a;
+          }
+        } else {
+          // Keep the OR as-is.
+          auto *or_vals = new RDKit::ATOM_OR_QUERY;
+          or_vals->setDescription("AtomOr");
+          for (const auto &[v, nd] : val_to_node) {
+            or_vals->addChild(AtomQuery::CHILD_TYPE(nd->copy()));
+          }
+
+          if (residual_nodes.empty()) {
+            // No residuals — just the OR of candidate values.
+            and_node = or_vals;
+          } else {
+            auto *a = new RDKit::ATOM_AND_QUERY;
+            a->setDescription("AtomAnd");
+            a->addChild(AtomQuery::CHILD_TYPE(or_vals));
+            for (const auto *n : residual_nodes) {
+              a->addChild(AtomQuery::CHILD_TYPE(n->copy()));
+            }
+            and_node = a;
+          }
+        }
+
+        if (verbose) {
+          std::cout << "    factored group {";
+          for (const auto &s : res_sigs)
+            std::cout << " " << s.desc << "=" << s.val;
+          std::cout << " }: " << grp.entries.size() << " terms -> "
+                    << query_to_smarts_str(and_node) << "\n";
+        }
+
+        // If the simplified node is a plain AND (no nested OR), it can
+        // be added directly without a recursive wrapper.
+        bool needs_recursive_wrap = false;
+        if (mode == SimplifyMode::kKeepOr) {
+          needs_recursive_wrap = true;  // has OR>AND>OR
+        }
+        // Else: kDropEntirely or kNegate produce no nested OR, safe to
+        // add as a direct term.
+
+        if (needs_recursive_wrap) {
+          // Wrap in $([…]) to avoid the OR>AND>OR serialization issue.
+          RDKit::QueryAtom tmp_qa;
+          tmp_qa.setQuery(and_node);  // takes ownership
+          const std::string inner_smarts =
+              RDKit::SmartsWrite::GetAtomSmarts(&tmp_qa);
+          std::unique_ptr<RDKit::ROMol> inner_mol(
+              RDKit::SmartsToMol(inner_smarts));
+          if (inner_mol) {
+            auto *rsq = new RDKit::RecursiveStructureQuery(
+                new RDKit::ROMol(*inner_mol, true));
+            rsq->setDescription("RecursiveStructure");
+            new_or->addChild(AtomQuery::CHILD_TYPE(rsq));
+          } else {
+            // Fallback: keep original terms.
+            for (const auto &e : grp.entries) {
+              new_or->addChild(AtomQuery::CHILD_TYPE(
+                  factorable[e.term_idx].original->copy()));
+            }
+          }
+        } else {
+          new_or->addChild(AtomQuery::CHILD_TYPE(and_node));
+        }
+      } else {
+        // Single-term group or single value — keep original terms.
+        for (const auto &e : grp.entries) {
+          new_or->addChild(
+              AtomQuery::CHILD_TYPE(factorable[e.term_idx].original->copy()));
+        }
+      }
+    }
+
+    // Add factorable terms that don't contain the candidate.
+    for (size_t i : terms_without) {
+      new_or->addChild(AtomQuery::CHILD_TYPE(factorable[i].original->copy()));
+    }
+
+    // Add unfactorable terms (recursive, NOT, etc.).
+    for (const auto *t : unfactorable) {
+      new_or->addChild(AtomQuery::CHILD_TYPE(t->copy()));
+    }
+
+    // If the new OR has only one child, return the child directly.
+    if (std::distance(new_or->beginChildren(), new_or->endChildren()) == 1) {
+      auto *single = new_or->beginChildren()->get()->copy();
+      delete new_or;
+      if (verbose) {
+        std::cout << "    result (single child, unwrapped): "
+                  << query_to_smarts_str(single) << "\n";
+      }
+      return single;
+    }
+
+    if (verbose) {
+      std::cout << "    result OR: " << query_to_smarts_str(new_or) << "\n";
+    }
+    return new_or;
   };
 
   // ---- Parse, transform, serialize ----
@@ -2486,22 +2842,45 @@ std::string factor_or_common_primitives(const std::string &smarts) {
     auto *q = qatom->getQuery();
     const std::string &desc = q->getDescription();
 
+    if (verbose) {
+      std::cout << "  atom " << atom->getIdx() << ": "
+                << RDKit::SmartsWrite::GetAtomSmarts(
+                       static_cast<const RDKit::Atom *>(qatom))
+                << "  (top-level=" << desc << ")\n";
+    }
+
     if (is_or(desc)) {
       AtomQuery *factored = try_factor(q);
       if (factored) {
+        if (verbose)
+          std::cout << "    -> factored top-level OR: "
+                    << query_to_smarts_str(factored) << "\n";
         qatom->setQuery(factored);
         changed = true;
+      } else {
+        if (verbose) std::cout << "    -> top-level OR: no factoring\n";
       }
     } else if (is_and(desc)) {
       // Check whether any OR child can be factored.
       std::vector<std::pair<size_t, AtomQuery *>> factored_children;
       size_t idx = 0;
-      for (auto it = q->beginChildren(); it != q->endChildren();
-           ++it, ++idx) {
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it, ++idx) {
         const auto *child = it->get();
         if (child && is_or(child->getDescription())) {
+          if (verbose)
+            std::cout << "    AND child " << idx << " is OR ("
+                      << query_to_smarts_str(child) << "), trying factor\n";
           AtomQuery *f = try_factor(child);
-          if (f) factored_children.push_back({idx, f});
+          if (f) {
+            if (verbose)
+              std::cout << "    -> factored AND-child OR at idx " << idx << ": "
+                        << query_to_smarts_str(f) << "\n";
+            factored_children.push_back({idx, f});
+          } else {
+            if (verbose)
+              std::cout << "    -> AND-child OR at idx " << idx
+                        << ": no factoring\n";
+          }
         }
       }
 
@@ -2519,8 +2898,7 @@ std::string factor_or_common_primitives(const std::string &smarts) {
             if (is_and(factored->getDescription())) {
               for (auto fit = factored->beginChildren();
                    fit != factored->endChildren(); ++fit) {
-                new_and->addChild(
-                    AtomQuery::CHILD_TYPE(fit->get()->copy()));
+                new_and->addChild(AtomQuery::CHILD_TYPE(fit->get()->copy()));
               }
               delete factored;
             } else {
@@ -2540,8 +2918,160 @@ std::string factor_or_common_primitives(const std::string &smarts) {
     }
   }
 
-  if (!changed) return smarts;
-  return RDKit::MolToSmarts(*mol);
+  // ---- Pass 2: Factor within recursive expressions & unwrap ----
+  // Helper: check if a query tree contains any OR node.
+  std::function<bool(const AtomQuery *)> has_or_node;
+  has_or_node = [&](const AtomQuery *q) -> bool {
+    if (!q) return false;
+    if (is_or(q->getDescription())) return true;
+    for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+      if (has_or_node(it->get())) return true;
+    }
+    return false;
+  };
+
+  // Recursively walk a query tree, processing RecursiveStructureQuery nodes.
+  // Returns a new query (caller owns) if any change was made, or nullptr.
+  std::function<AtomQuery *(const AtomQuery *)> process_recursive_children;
+  process_recursive_children = [&](const AtomQuery *q) -> AtomQuery * {
+    if (!q) return nullptr;
+    const std::string &d = q->getDescription();
+
+    if (d == "RecursiveStructure") {
+      const auto *rsq = dynamic_cast<const RDKit::RecursiveStructureQuery *>(q);
+      if (!rsq || !rsq->getQueryMol()) return nullptr;
+
+      // Serialize inner mol, factor it, check for changes.
+      const std::string inner_smarts = RDKit::MolToSmarts(*rsq->getQueryMol());
+      const std::string factored_inner =
+          factor_or_common_primitives(inner_smarts, verbose);
+
+      // Parse the factored inner SMARTS.
+      std::unique_ptr<RDKit::ROMol> inner_mol(
+          RDKit::SmartsToMol(factored_inner));
+      if (!inner_mol) return nullptr;
+
+      // Check if we can unwrap: 1-atom mol, no OR in the anchor query.
+      if (inner_mol->getNumAtoms() == 1) {
+        const auto *anchor = dynamic_cast<const RDKit::QueryAtom *>(
+            inner_mol->getAtomWithIdx(0));
+        if (anchor && anchor->getQuery() && !has_or_node(anchor->getQuery())) {
+          if (verbose) {
+            std::cout << "    unwrapping recursive $(" << factored_inner
+                      << ") -> inline primitives\n";
+          }
+          // Return a copy of the anchor's query (unwrapped).
+          auto *unwrapped = anchor->getQuery()->copy();
+          // Preserve negation from the original RecursiveStructureQuery.
+          if (q->getNegation()) {
+            unwrapped->setNegation(!unwrapped->getNegation());
+          }
+          return unwrapped;
+        }
+      }
+
+      // Inner mol changed but can't unwrap — rebuild RecursiveStructureQuery.
+      if (factored_inner != inner_smarts) {
+        auto *new_rsq = new RDKit::RecursiveStructureQuery(
+            new RDKit::ROMol(*inner_mol, true), rsq->getSerialNumber());
+        new_rsq->setNegation(q->getNegation());
+        new_rsq->setDescription("RecursiveStructure");
+        if (verbose) {
+          std::cout << "    factored recursive inner: $(" << inner_smarts
+                    << ") -> $(" << factored_inner << ")\n";
+        }
+        return new_rsq;
+      }
+      return nullptr;
+    }
+
+    // For AND/OR/NOT nodes, recurse into children.
+    if (is_and(d) || is_or(d) || d == "AtomNot" || d == "Not") {
+      std::vector<std::pair<size_t, AtomQuery *>> replacements;
+      size_t idx = 0;
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it, ++idx) {
+        AtomQuery *result = process_recursive_children(it->get());
+        if (result) {
+          replacements.push_back({idx, result});
+        }
+      }
+      if (replacements.empty()) return nullptr;
+
+      // Rebuild this node with replaced children.
+      AtomQuery *new_node = nullptr;
+      if (is_and(d)) {
+        auto *n = new RDKit::ATOM_AND_QUERY;
+        n->setDescription(d);
+        new_node = n;
+      } else if (is_or(d)) {
+        auto *n = new RDKit::ATOM_OR_QUERY;
+        n->setDescription(d);
+        new_node = n;
+      } else {
+        // NOT or other composite node — use AND wrapper to hold single child.
+        auto *n = new RDKit::ATOM_AND_QUERY;
+        n->setDescription(d);
+        n->setNegation(q->getNegation());
+        new_node = n;
+      }
+
+      size_t child_idx = 0;
+      size_t ri = 0;
+      for (auto it = q->beginChildren(); it != q->endChildren();
+           ++it, ++child_idx) {
+        if (ri < replacements.size() && replacements[ri].first == child_idx) {
+          auto *repl = replacements[ri].second;
+          // If replacing a RecursiveStructure with unwrapped AND query,
+          // flatten it into the parent AND.
+          if (is_and(d) && is_and(repl->getDescription())) {
+            for (auto fit = repl->beginChildren(); fit != repl->endChildren();
+                 ++fit) {
+              new_node->addChild(AtomQuery::CHILD_TYPE(fit->get()->copy()));
+            }
+            delete repl;
+          } else {
+            new_node->addChild(AtomQuery::CHILD_TYPE(repl));
+          }
+          ++ri;
+        } else {
+          new_node->addChild(AtomQuery::CHILD_TYPE(it->get()->copy()));
+        }
+      }
+      return new_node;
+    }
+
+    return nullptr;
+  };
+
+  for (auto *atom : mol->atoms()) {
+    auto *qatom = dynamic_cast<RDKit::QueryAtom *>(atom);
+    if (!qatom || !qatom->getQuery()) continue;
+
+    AtomQuery *result = process_recursive_children(qatom->getQuery());
+    if (result) {
+      qatom->setQuery(result);
+      changed = true;
+      if (verbose) {
+        std::cout << "  atom " << atom->getIdx()
+                  << " after recursive processing: "
+                  << RDKit::SmartsWrite::GetAtomSmarts(
+                         static_cast<const RDKit::Atom *>(qatom))
+                  << "\n";
+      }
+    }
+  }
+
+  if (!changed) {
+    if (verbose)
+      std::cout << "  result: no change -> " << smarts << "\n"
+                << "===== end factor_or_common_primitives =====\n\n";
+    return smarts;
+  }
+  auto result = RDKit::MolToSmarts(*mol);
+  if (verbose)
+    std::cout << "  result: " << result << "\n"
+              << "===== end factor_or_common_primitives =====\n\n";
+  return result;
 }
 
 std::string canonicalize_smarts_basic(const std::string &smarts) {
@@ -2579,7 +3109,8 @@ std::string canonicalize_negated_recursive_inner(const std::string &inner) {
   try {
     atom_typer::SmartsAnalyzer sa;
 
-    const auto out = sa.standard_smarts({inner}, false,false,false,workflow_options);
+    const auto out =
+        sa.standard_smarts({inner}, false, false, false, workflow_options);
     --recursive_canon_depth;
     if (!out.empty() && !out.front().empty()) {
       return clear_atom_maps_in_smarts(out.front());
@@ -2859,9 +3390,8 @@ std::vector<std::string> perceive_tautomers(
 }  // namespace
 
 std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
-  std::vector<std::string> smarts_list, bool verbose, bool ignoreValence,
-  bool catchErrors,
-  const StandardSmartsWorkflowOptions &workflow_options,
+    std::vector<std::string> smarts_list, bool verbose, bool ignoreValence,
+    bool catchErrors, const StandardSmartsWorkflowOptions &workflow_options,
     const StandardSmartsLogOptions &log_options) {
   ZoneScopedN("SmartsAnalyzer::generate_all_combos");
   atom_typer::SmartsAnalyzer sa;
@@ -2888,7 +3418,7 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
     // std::cout << "Processing SMARTS: " << test1 << std::endl;
     const std::string mapped_smarts = sa.add_atom_maps(test1);
     int max_amap = 0;
-    auto mol = RDKit::SmartsToMol(mapped_smarts);
+    auto mol = RDKit::SmartsToMol(mapped_smarts, 0, true);
     for (const auto *atom : mol->atoms()) {
       int amap = atom->getAtomMapNum();
       if (amap > max_amap) {
@@ -2900,9 +3430,9 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
     }
 
     const bool enumerate_verbose = log_enabled(LogVariants);
-    const auto variants = sa.enumerate_variants(
-      mapped_smarts, 1000, enumerate_verbose, true,
-      workflow_options.enumerate_bond_order);
+    const auto variants =
+        sa.enumerate_variants(mapped_smarts, 1000, enumerate_verbose, true,
+                              workflow_options.enumerate_bond_order);
 
     if (log_enabled(LogSummary)) {
       std::cout << "Generated " << variants.size() << " variants in r1.\n";
@@ -2950,10 +3480,29 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
       if (log_enabled(LogAtomTyping)) {
         std::cout << ">>> Extracted SMARTS: " << extracted_smarts << std::endl;
       }
-      const auto variants2_taut = sa.enumerate_variants(
-          extracted_smarts, 20000, enumerate_verbose, false,
-          workflow_options.enumerate_bond_order);
-      // const auto variants2_taut = perceive_tautomers(variants2, verbose);
+      RDKit::STR_VECT variants2_taut;
+      try {
+        variants2_taut =
+            sa.enumerate_variants(extracted_smarts, 20000, enumerate_verbose,
+                                  false, workflow_options.enumerate_bond_order);
+        // const auto variants2_taut = perceive_tautomers(variants2, verbose);
+
+      } catch (const std::exception &e) {
+        if (log_enabled(LogErrors)) {
+          std::cout << "Error enumerating variants for '" << extracted_smarts
+                    << "': " << e.what() << std::endl;
+        }
+        if (catchErrors) {
+          throw std::runtime_error(
+              "Error enumerating variants for: " + extracted_smarts + " - " +
+              std::string(e.what()));
+        } else {
+          these_results.push_back(
+              extracted_smarts);  // Fallback to extracted SMARTS if tautomer
+                                  // enumeration fails.
+          continue;
+        }
+      }
 
       bool seen_invalid = false;
       std::vector<std::string> these_results_split;
@@ -3019,10 +3568,11 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
       }
 
       std::vector<std::string> first_consolidation =
-          at.consolidate_smarts_by_atom_maps_recanon(removed_recursive_maps_consolidation);
+          at.consolidate_smarts_by_atom_maps_recanon(
+              removed_recursive_maps_consolidation);
 
-      std::string final_smarts = at.consolidate_smarts_with_recursive_paths(
-          first_consolidation);
+      std::string final_smarts =
+          at.consolidate_smarts_with_recursive_paths(first_consolidation);
       these_results.push_back(final_smarts);
       if (log_enabled(LogFinal)) {
         for (const auto &s : first_consolidation) {
@@ -3041,20 +3591,19 @@ std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
 }
 
 std::vector<std::vector<std::string>> SmartsAnalyzer::generate_all_combos(
-  std::vector<std::string> smarts_list, bool verbose,
-  bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
-  const StandardSmartsLogOptions &log_options) {
+    std::vector<std::string> smarts_list, bool verbose,
+    bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
+    const StandardSmartsLogOptions &log_options) {
   StandardSmartsWorkflowOptions workflow_options;
-  workflow_options.include_x_in_reserialization =
-    include_x_in_reserialization;
+  workflow_options.include_x_in_reserialization = include_x_in_reserialization;
   return generate_all_combos(smarts_list, verbose, ignoreValence, catchErrors,
-               workflow_options, log_options);
+                             workflow_options, log_options);
 }
 
 std::vector<std::string> SmartsAnalyzer::standard_smarts(
     const std::vector<std::string> &smarts_list, bool verbose,
-  bool ignoreValence, bool catchErrors,
-  const StandardSmartsWorkflowOptions &workflow_options,
+    bool ignoreValence, bool catchErrors,
+    const StandardSmartsWorkflowOptions &workflow_options,
     const StandardSmartsLogOptions &log_options) {
   ZoneScopedN("SmartsAnalyzer::standard_smarts");
   atom_typer::SmartsAnalyzer sa;
@@ -3066,11 +3615,23 @@ std::vector<std::string> SmartsAnalyzer::standard_smarts(
     }
     return log_options.enabled && (log_options.flags & flag) != 0u;
   };
-
-  std::vector<std::vector<std::string>> results =
-      sa.generate_all_combos(smarts_list, verbose, ignoreValence, catchErrors,
-                 workflow_options, log_options);
-
+  std::vector<std::vector<std::string>> results;
+  try {
+    results =
+        sa.generate_all_combos(smarts_list, verbose, ignoreValence, catchErrors,
+                               workflow_options, log_options);
+  } catch (const std::exception &e) {
+    if (log_enabled(LogErrors)) {
+      std::cout << "Error in generate_all_combos: " << e.what() << std::endl;
+    }
+    if (catchErrors) {
+      throw std::runtime_error("Error in generate_all_combos: " +
+                               std::string(e.what()));
+    } else {
+      return smarts_list;  // Fallback to original SMARTS list if processing
+                           // fails.
+    }
+  }
   int idx = 0;
   std::vector<std::string> out;
   out.reserve(results.size());
@@ -3171,7 +3732,20 @@ std::vector<std::string> SmartsAnalyzer::standard_smarts(
     // if (log_enabled(LogFinal)) {
     //   std::cout << "\t[final_pre_factor] " << final_smarts << std::endl;
     // }
-    // final_smarts = factor_or_common_primitives(final_smarts);
+    try {
+      final_smarts = factor_or_common_primitives(final_smarts, false);
+    } catch (const std::exception &e) {
+      if (log_enabled(LogErrors)) {
+        std::cout << "Warning: factor_or_common_primitives failed for '"
+                  << final_smarts << "': " << e.what()
+                  << " (keeping unfactored)" << std::endl;
+      }
+    } catch (...) {
+      if (log_enabled(LogErrors)) {
+        std::cout << "Warning: factor_or_common_primitives failed for '"
+                  << final_smarts << "' (keeping unfactored)" << std::endl;
+      }
+    }
 
     if (log_enabled(LogFinal)) {
       // std::cout << "Input SMARTS: " << this_smarts << std::endl;
@@ -3185,13 +3759,12 @@ std::vector<std::string> SmartsAnalyzer::standard_smarts(
 }
 
 std::vector<std::string> SmartsAnalyzer::standard_smarts(
-  const std::vector<std::string> &smarts_list, bool verbose,
-  bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
-  const StandardSmartsLogOptions &log_options) {
+    const std::vector<std::string> &smarts_list, bool verbose,
+    bool include_x_in_reserialization, bool ignoreValence, bool catchErrors,
+    const StandardSmartsLogOptions &log_options) {
   StandardSmartsWorkflowOptions workflow_options;
-  workflow_options.include_x_in_reserialization =
-    include_x_in_reserialization;
+  workflow_options.include_x_in_reserialization = include_x_in_reserialization;
   return standard_smarts(smarts_list, verbose, ignoreValence, catchErrors,
-             workflow_options, log_options);
+                         workflow_options, log_options);
 }
 }  // namespace atom_typer

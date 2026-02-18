@@ -132,8 +132,13 @@ class AtomTyper::Impl {
       } else if (descr == "AtomInRing") {
         constraints.in_ring = true;
       } else if ((descr == "AtomInNRings" || descr == "AtomRingCount") && eq) {
-        constraints.ring_count = eq->getVal();
-        constraints.in_ring = eq->getVal() > 0;
+        if (eq->getVal() < 0) {
+          // R without a number: val=-1 means "in any ring"
+          constraints.in_ring = true;
+        } else {
+          constraints.ring_count = eq->getVal();
+          constraints.in_ring = eq->getVal() > 0;
+        }
       } else if (descr == "AtomMinRingSize" && eq) {
         constraints.min_ring_size = eq->getVal();
         constraints.in_ring = true;
@@ -153,6 +158,17 @@ class AtomTyper::Impl {
         constraints.excluded_aromatic = true;
       } else if (descr == "AtomAliphatic") {
         constraints.excluded_aliphatic = true;
+      } else if (descr == "AtomInRing") {
+        // Negated AtomInRing means "not in ring" → in_ring = false
+        constraints.in_ring = false;
+      } else if ((descr == "AtomInNRings" || descr == "AtomRingCount") && eq) {
+        if (eq->getVal() < 0) {
+          // Negated R (no number): val=-1 means "not in any ring"
+          constraints.in_ring = false;
+        } else if (eq->getVal() == 0) {
+          // Negated ring-count: !R0 means "in a ring"
+          constraints.in_ring = true;
+        }
       }
     }
 
@@ -461,8 +477,23 @@ class AtomTyper::Impl {
           case RDKit::Bond::BondType::AROMATIC:
             at.num_aromatic_bonds++;
             break;
-          default:
+          default: {
+            // For SMARTS query bonds, getBondType() may return OTHER or
+            // UNSPECIFIED even for explicit = / # bonds.  Fall back to
+            // the bond's SMARTS string to classify them.
+            const std::string bs = RDKit::SmartsWrite::GetBondSmarts(
+                bond, static_cast<int>(bond->getBeginAtomIdx()));
+            if (bs == "=" || bs == "=") {
+              at.num_double_bonds++;
+            } else if (bs == "#") {
+              at.num_triple_bonds++;
+            } else if (bs == ":" || bs == "~") {
+              at.num_aromatic_bonds++;
+            } else {
+              at.num_single_bonds++;
+            }
             break;
+          }
         }
       }
     }
@@ -514,8 +545,16 @@ class AtomTyper::Impl {
         token = token.substr(0, first_delim);
       }
 
+      bool was_negated = false;
       while (!token.empty() && token.front() == '!') {
         token.erase(token.begin());
+        was_negated = true;
+      }
+
+      // A negated atom constraint (e.g. !#1 = "not hydrogen") could match
+      // any element, so the atom can be either aromatic or aliphatic.
+      if (was_negated) {
+        return std::pair<std::optional<bool>, std::optional<bool>>{true, true};
       }
 
       // lowercase aromatic symbols
@@ -1079,17 +1118,48 @@ class AtomTyper::Impl {
                             }),
              hs.end());
 
+    // Per-element charge range table.
+    // Maps atomic number → {min_charge, max_charge}.
+    // Elements not in the table fall back to settings.charge_min/max.
+    static const std::unordered_map<int, std::pair<int, int>>
+        element_charge_range = {
+            {1,  {0, 1}},   // H:  0, +1
+            {3,  {0, 1}},   // Li: 0, +1
+            {5,  {-1, 0}},  // B:  -1, 0
+            {6,  {-1, 1}},  // C:  -1, 0, +1
+            {7,  {0, 1}},  // N:  -1, 0, +1
+            {8,  {-1, 0}},  // O:  -1, 0
+            {9,  {-1, 0}},  // F:  -1, 0
+            {11, {0, 1}},   // Na: 0, +1
+            {12, {0, 2}},   // Mg: 0, +2
+            {14, {-1, 1}},  // Si: -1, 0, +1
+            {15, {-1, 1}},  // P:  -1, 0, +1
+            {16, {-1, 1}},  // S:  -1, 0, +1
+            {17, {-1, 0}},  // Cl: -1, 0
+            {19, {0, 1}},   // K:  0, +1
+            {20, {0, 2}},   // Ca: 0, +2
+            {26, {0, 3}},   // Fe: 0..+3
+            {29, {0, 2}},   // Cu: 0..+2
+            {30, {0, 2}},   // Zn: 0..+2
+            {34, {-1, 1}},  // Se: -1, 0, +1
+            {35, {-1, 0}},  // Br: -1, 0
+            {53, {-1, 1}},  // I:  -1, 0, +1
+        };
+
     std::vector<int> charges;
     if (at.atom.explicit_charge.has_value()) {
       charges.push_back(*at.atom.explicit_charge);
     } else {
       int charge_min = std::min(settings.charge_min, settings.charge_max);
-      if (at.atom.atomic_number == 5){
-        charge_min = 0;
+      int charge_max = std::max(settings.charge_min, settings.charge_max);
+
+      // Override from per-element table if present.
+      auto ecr_it = element_charge_range.find(at.atom.atomic_number);
+      if (ecr_it != element_charge_range.end()) {
+        charge_min = std::max(charge_min, ecr_it->second.first);
+        charge_max = std::min(charge_max, ecr_it->second.second);
       }
 
-
-      const int charge_max = std::max(settings.charge_min, settings.charge_max);
       for (int c = charge_min; c <= charge_max; ++c) {
         charges.push_back(c);
       }
@@ -1409,11 +1479,47 @@ class AtomTyper::Impl {
     //                                 at.atom.excluded_aromatic ||
     //                                 at.atom.excluded_aliphatic;
     const bool include_arom_terms = true;
+
+    // Negation shortcut: when a dimension varies only because of exclusion
+    // constraints (no positive value was specified in the original SMARTS),
+    // emit the negation(s) as shared prefix constraints instead of
+    // enumerating all valid alternatives in OR branches.  This avoids
+    // combinatorial explosion for patterns like [#16&!H0].
+    const bool h_via_negation = !all_same_h &&
+        !at.atom.explicit_H.has_value() &&
+        !at.atom.excluded_h_counts.empty();
+    const bool charge_via_negation = !all_same_charge &&
+        !at.atom.explicit_charge.has_value() &&
+        !at.atom.excluded_charges.empty();
+    const bool degree_via_negation = !all_same_degree &&
+        !at.atom.explicit_D.has_value() &&
+        !at.atom.excluded_D_values.empty();
+
+    // Unconstrained shortcut: when a dimension was never specified or
+    // excluded in the original SMARTS, it adds no discriminating power
+    // beyond what the element + other constraints already provide.
+    // Omit it from the output to avoid redundant enumeration.
+    const bool h_unconstrained = !all_same_h &&
+        !at.atom.explicit_H.has_value() &&
+        at.atom.excluded_h_counts.empty();
+    const bool charge_unconstrained = !all_same_charge &&
+        !at.atom.explicit_charge.has_value() &&
+        at.atom.excluded_charges.empty();
+    const bool degree_unconstrained = !all_same_degree &&
+        !at.atom.explicit_D.has_value() &&
+        at.atom.excluded_D_values.empty();
+
+    // When candidates include both aromatic and aliphatic forms and the
+    // atomic number is already in the prefix, the A/a terms are redundant
+    // — #N already covers both.  Drop them to avoid pointless OR branches.
+    const bool arom_both_present = !all_same_arom;
+
     const bool no_varying_primitive_terms =
-        (!include_degree_terms || all_same_degree) &&
-        (!include_x_terms || all_same_x) && (!include_h_terms || all_same_h) &&
-        (!include_charge_terms || all_same_charge) &&
-        (!include_arom_terms || all_same_arom);
+        (!include_degree_terms || all_same_degree || degree_via_negation || degree_unconstrained) &&
+        (!include_x_terms || all_same_x) &&
+        (!include_h_terms || all_same_h || h_via_negation || h_unconstrained) &&
+        (!include_charge_terms || all_same_charge || charge_via_negation || charge_unconstrained) &&
+        (!include_arom_terms || all_same_arom || arom_both_present);
 
     const bool include_bond_constraints = settings.enumerate_bond_order;
     const bool no_varying_bonds =
@@ -1463,7 +1569,41 @@ class AtomTyper::Impl {
       return "";
     }();
 
-    out << "[" << "#" << std::to_string(at.atom.atomic_number);
+    // If the atom is attached to a double or triple bond it must be
+    // aliphatic, so emit the element symbol instead of the generic #N
+    // token.  This ensures [#6]=[#8] and [C]=[O] produce the same output.
+    const bool has_multi_bond =
+        at.atom.num_double_bonds > 0 || at.atom.num_triple_bonds > 0;
+
+    static const std::unordered_map<int, std::string> aliphatic_symbol = {
+        {5, "B"},   {6, "C"},   {7, "N"},   {8, "O"},   {9, "F"},
+        {14, "Si"}, {15, "P"},  {16, "S"},  {17, "Cl"}, {33, "As"},
+        {34, "Se"}, {35, "Br"}, {53, "I"},
+    };
+
+    std::string atom_prefix;
+    if (has_multi_bond) {
+      auto sym_it = aliphatic_symbol.find(at.atom.atomic_number);
+      if (sym_it != aliphatic_symbol.end()) {
+        atom_prefix = sym_it->second;
+      } else {
+        atom_prefix = "#" + std::to_string(at.atom.atomic_number);
+      }
+    } else {
+      atom_prefix = "#" + std::to_string(at.atom.atomic_number);
+    }
+
+    // When the prefix is an element symbol (e.g. "N", "C") rather than
+    // the generic "#N" form, it already implies aliphatic (uppercase) or
+    // aromatic (lowercase).  Track this so we can suppress a redundant ;A / ;a.
+    const bool prefix_implies_aliphatic =
+        !atom_prefix.empty() && atom_prefix[0] != '#' &&
+        std::isupper(static_cast<unsigned char>(atom_prefix[0]));
+    const bool prefix_implies_aromatic =
+        !atom_prefix.empty() && atom_prefix[0] != '#' &&
+        std::islower(static_cast<unsigned char>(atom_prefix[0]));
+
+    out << "[" << atom_prefix;
     if (!ring_constraint_token.empty()) {
       out << ";" << ring_constraint_token;
     }
@@ -1482,16 +1622,28 @@ class AtomTyper::Impl {
     //   }
     // }
 
-    if (include_h_terms && all_same_h) {
+    if (h_via_negation) {
+      for (int excl : at.atom.excluded_h_counts) {
+        out << ";!H" << excl;
+      }
+    } else if (include_h_terms && all_same_h) {
       out << ";H" << candidates.front().h_count;
     }
-    if (include_degree_terms && all_same_degree) {
+    if (degree_via_negation) {
+      for (int excl : at.atom.excluded_D_values) {
+        out << ";!D" << excl;
+      }
+    } else if (include_degree_terms && all_same_degree) {
       out << ";D" << serialized_degree_value(candidates.front());
     }
     if (include_x_terms && all_same_x) {
       out << ";X" << candidate_x_value(candidates.front());
     }
-    if (include_charge_terms && all_same_charge) {
+    if (charge_via_negation) {
+      for (int excl : at.atom.excluded_charges) {
+        out << ";!" << charge_token(excl);
+      }
+    } else if (include_charge_terms && all_same_charge) {
       out << ";" << charge_token(candidates.front().charge);
     }
 
@@ -1501,9 +1653,13 @@ class AtomTyper::Impl {
 
     if (include_arom_terms && all_same_arom) {
       if (candidates.front().arom) {
-        out << ";a";
+        if (!prefix_implies_aromatic) {
+          out << ";a";
+        }
       } else {
-        out << ";A";
+        if (!prefix_implies_aliphatic) {
+          out << ";A";
+        }
       }
     }
 
@@ -1543,7 +1699,7 @@ class AtomTyper::Impl {
 
     for (size_t i = 0; i < candidates.size(); ++i) {
       bool wrote_any = false;
-      if (include_degree_terms && !all_same_degree) {
+      if (include_degree_terms && !all_same_degree && !degree_via_negation && !degree_unconstrained) {
         out << "D" << serialized_degree_value(candidates[i]);
         wrote_any = true;
       }
@@ -1554,14 +1710,14 @@ class AtomTyper::Impl {
         out << "X" << candidate_x_value(candidates[i]);
         wrote_any = true;
       }
-      if (include_h_terms && !all_same_h) {
+      if (include_h_terms && !all_same_h && !h_via_negation && !h_unconstrained) {
         if (wrote_any) {
           out << "&";
         }
         out << "H" << candidates[i].h_count;
         wrote_any = true;
       }
-      if (include_charge_terms && !all_same_charge) {
+      if (include_charge_terms && !all_same_charge && !charge_via_negation && !charge_unconstrained) {
         if (wrote_any) {
           out << "&";
         }
@@ -1569,12 +1725,17 @@ class AtomTyper::Impl {
         wrote_any = true;
       }
 
-      if (include_arom_terms && !all_same_arom) {
-        if (wrote_any) {
-          out << "&";
+      if (include_arom_terms && !all_same_arom && !arom_both_present) {
+        const bool skip_arom_token =
+            (candidates[i].arom && prefix_implies_aromatic) ||
+            (!candidates[i].arom && prefix_implies_aliphatic);
+        if (!skip_arom_token) {
+          if (wrote_any) {
+            out << "&";
+          }
+          out << (candidates[i].arom ? "a" : "A");
+          wrote_any = true;
         }
-        out << (candidates[i].arom ? "a" : "A");
-        wrote_any = true;
       }
 
       if (include_bond_constraints && !no_varying_bonds) {
@@ -1755,8 +1916,14 @@ std::string AtomTyper::type_atoms_from_smarts(
     throw std::runtime_error("Failed to parse SMARTS: " + smarts);
   }
 
-  //   mol->updatePropertyCache();
-  //   RDKit::MolOps::findSSSR(*mol);
+  // Compute implicit valence / property cache BEFORE process_molecule so that
+  // assignStereochemistry and extract_atom_type can safely call
+  // getTotalNumHs() on query atoms (e.g. [#7&h1] has df_noImplicit=false).
+  try {
+    mol->updatePropertyCache(false);
+  } catch (...) {
+    // Best-effort: SMARTS molecules may not have enough info for all atoms.
+  }
 
   AtomTyper::Impl::EnumerationSettings settings;
   settings.h_min = std::min(h_min, h_max);
@@ -1825,6 +1992,9 @@ std::string AtomTyper::type_atoms_from_smarts(
     if (token == "*" || token == "a" || token == "A") {
       return true;
     }
+    if (token == "!#1") {
+      return true;
+    }
 
     if (token.size() >= 2 && token[0] == '#') {
       return std::all_of(token.begin() + 1, token.end(), [](char c) {
@@ -1865,6 +2035,85 @@ std::string AtomTyper::type_atoms_from_smarts(
     const std::string source_atom_smarts =
         RDKit::SmartsWrite::GetAtomSmarts(rewritten.getAtomWithIdx(i));
     if (is_single_primitive_atom_pattern(source_atom_smarts)) {
+      // If the atom uses #N notation and is attached to a double or triple
+      // bond, it must be aliphatic.  Convert to the aliphatic element
+      // symbol so that [#6]=[#8] and [C]=[O] produce the same output.
+      static const std::unordered_map<int, std::string> aliphatic_sym = {
+          {5, "B"},   {6, "C"},   {7, "N"},   {8, "O"},   {9, "F"},
+          {14, "Si"}, {15, "P"},  {16, "S"},  {17, "Cl"}, {33, "As"},
+          {34, "Se"}, {35, "Br"}, {53, "I"},
+      };
+
+      // Strip brackets to get the bare token (e.g. "#6" from "[#6]")
+      std::string token = source_atom_smarts;
+      if (token.size() >= 2 && token.front() == '[' && token.back() == ']') {
+        token = token.substr(1, token.size() - 2);
+      }
+      // Strip trailing atom map (e.g. ":1")
+      auto colon = token.rfind(':');
+      if (colon != std::string::npos) {
+        token = token.substr(0, colon);
+      }
+
+      if (token.size() >= 2 && token[0] == '#') {
+        bool has_multi_bond = false;
+        const auto *rw_atom = rewritten.getAtomWithIdx(i);
+        for (const auto &nbr : rewritten.atomNeighbors(rw_atom)) {
+          const auto *bond =
+              rewritten.getBondBetweenAtoms(i, nbr->getIdx());
+          if (!bond) continue;
+          const std::string bs = RDKit::SmartsWrite::GetBondSmarts(
+              bond, static_cast<int>(bond->getBeginAtomIdx()));
+          if (bs.find('=') != std::string::npos ||
+              bs.find('#') != std::string::npos) {
+            has_multi_bond = true;
+            break;
+          }
+          auto bt = bond->getBondType();
+          if (bt == RDKit::Bond::DOUBLE || bt == RDKit::Bond::TRIPLE) {
+            has_multi_bond = true;
+            break;
+          }
+        }
+
+        if (has_multi_bond) {
+          int anum = 0;
+          try {
+            anum = std::stoi(token.substr(1));
+          } catch (...) {}
+          auto sym_it = aliphatic_sym.find(anum);
+          if (sym_it != aliphatic_sym.end()) {
+            // Build replacement: symbol form with original atom map
+            std::string new_smarts = "[" + sym_it->second;
+            // Preserve the atom map number from the original token
+            auto orig_colon = source_atom_smarts.rfind(':');
+            if (orig_colon != std::string::npos) {
+              new_smarts += source_atom_smarts.substr(orig_colon,
+                  source_atom_smarts.size() - orig_colon - 1);  // skip trailing ]
+            }
+            new_smarts += "]";
+
+            // Parse and replace the atom query on the rewritten mol
+            try {
+              std::unique_ptr<RDKit::RWMol> frag(
+                  RDKit::SmartsToMol(new_smarts));
+              if (frag && frag->getNumAtoms() == 1) {
+                auto *new_atom = frag->getAtomWithIdx(0);
+                if (new_atom->hasQuery()) {
+                  rewritten.getAtomWithIdx(i)->setQuery(
+                      new_atom->getQuery()->copy());
+                }
+                if (verbose) {
+                  std::cout << "[type_atoms_from_smarts] Converted " 
+                            << source_atom_smarts << " -> " << new_smarts
+                            << " (multi-bond forces aliphatic)" << std::endl;
+                }
+              }
+            } catch (...) {}
+          }
+        }
+      }
+
       if (verbose) {
         std::cout
             << "[type_atoms_from_smarts] Skipping DoF enumeration for atom idx "
@@ -2395,15 +2644,26 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
 
           if (has_a) {
             can_aliphatic = false;
+            can_aromatic = true;
           }
           if (has_A) {
             can_aromatic = false;
+            can_aliphatic = true;
           }
           if (has_not_a) {
+            // !a means NOT aromatic → must be aliphatic
             can_aromatic = false;
+            can_aliphatic = true;
           }
           if (has_not_A) {
+            // !A means NOT aliphatic → must be aromatic
             can_aliphatic = false;
+            can_aromatic = true;
+          }
+          // If no a/A primitives at all, atom could be either.
+          if (!has_a && !has_A && !has_not_a && !has_not_A) {
+            can_aromatic = true;
+            can_aliphatic = true;
           }
         };
 

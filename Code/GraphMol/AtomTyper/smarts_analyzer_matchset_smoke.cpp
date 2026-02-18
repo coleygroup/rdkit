@@ -550,7 +550,7 @@ void write_set_details(
 int main(int argc, char **argv) {
   ZoneScopedN("smartsAnalyzerMatchsetSmoke::main");
   try {
-    constexpr size_t kMinTemplateAtoms = 10;
+    constexpr size_t kMinTemplateAtoms = 20;
     const auto program_start = std::chrono::steady_clock::now();
     const std::filesystem::path csv_path = resolve_dataset_path(argc, argv);
     // const std::filesystem::path template_path =
@@ -569,7 +569,7 @@ int main(int argc, char **argv) {
         report_path.parent_path() /
         (report_path.stem().string() + "_stats.csv");
     const auto targets =
-      load_targets_from_csv(csv_path, 5000, random_selection, 1);
+      load_targets_from_csv(csv_path, 10000, random_selection, 1);
     const auto raw_smarts_list = load_templates_from_csv(template_path, 100000);
     size_t skipped_too_small = 0;
     size_t skipped_invalid_templates = 0;

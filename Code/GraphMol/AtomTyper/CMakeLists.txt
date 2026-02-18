@@ -49,6 +49,10 @@ if(RDK_BUILD_ATOMTYPER_SMOKE)
         target_link_libraries(smartsAnalyzerMatchsetSmoke PRIVATE TracyClient)
     endif()
 
+
+    add_executable(smartsAnalyzerEquivalenceTest unitTests.cpp)
+    target_link_libraries(smartsAnalyzerEquivalenceTest PRIVATE AtomTyper SmilesParse GraphMol RDGeneral SubstructMatch)
+
     # add_executable(smartsAnalyzerPrimitivesSmoke smarts_analyzer_primitives_smoke.cpp)
     # target_link_libraries(smartsAnalyzerPrimitivesSmoke PRIVATE AtomTyper SmilesParse)
     # if(RDK_BUILD_TRACY)
