@@ -806,6 +806,20 @@ class AtomTyper::Impl {
         modeled_aromatic_bonds = 2;
       }
 
+      if (at.atomic_number == 6){
+        if (charge == 0 && h_count == 1 && modeled_aromatic_bonds == 2 && double_bonds == 0 && triple_bonds == 0) {
+          // Furan-like: 2-electron lone-pair donor in a 5-member ring.
+          return true;
+        }
+        else if (charge == 0 && h_count == 1 && single_bonds == 2 && double_bonds == 0 && triple_bonds == 0) {
+          // Furan-like: 2-electron lone-pair donor in a 5-member ring.
+          return true;
+        } else if (charge == 0 && h_count == 1 && modeled_aromatic_bonds == 2 && single_bonds == 0 && double_bonds == 0 && triple_bonds == 0) {
+          // Pyrrole-like: 1-electron lone-pair donor in a 5-member ring.
+          return true;
+        }
+      }
+
       // In an aromatic ring, the atom will have 2 aromatic bonds in-ring.
       // If your counting expects something else, you'll need a fused-ring
       // builder. For now, we treat ring bonds as satisfying aromaticity
@@ -817,13 +831,33 @@ class AtomTyper::Impl {
         return false;
       }
 
-      // For [nH]-like aromatic heteroatoms, a 5-member aromatic context is a
+      // For aromatic heteroatoms, a 5-member aromatic context is often a
       // better minimal probe than benzene-like 6-member embedding.
+      // - [nH]-like atoms (h_count > 0): pyrrole / imidazole nitrogen
+      // - Lone-pair donors with D2,H0,+0: furan oxygen, thiophene sulfur,
+      //   selenophene selenium — these contribute 2 electrons to the π-system
+      //   via a lone pair and naturally occur in 5-member aromatic rings.
       int aromatic_ring_size = 6;
-      if ((at.atomic_number == 7 || at.atomic_number == 8 ||
-           at.atomic_number == 16) &&
+      const bool is_lp_donor_heteroatom =
+          (at.atomic_number == 8 || at.atomic_number == 16 ||
+           at.atomic_number == 34);
+      if ((at.atomic_number == 7 || is_lp_donor_heteroatom) &&
           h_count > 0) {
         aromatic_ring_size = 5;
+      } else if (is_lp_donor_heteroatom && h_count == 0 && charge == 0 &&
+                 modeled_aromatic_bonds == 2) {
+        // Furan-like: 2-electron lone-pair donor in a 5-member ring.
+        aromatic_ring_size = 5;
+      }
+
+      if (at.atomic_number == 8 || at.atomic_number == 7){
+        if (charge == 0 && h_count == 0 && modeled_aromatic_bonds == 2 && double_bonds == 0 && triple_bonds == 0) {
+          // Furan-like: 2-electron lone-pair donor in a 5-member ring.
+          return true;
+        } else if (charge == 0 && h_count == 1 && modeled_aromatic_bonds == 2 && single_bonds == 0 && double_bonds == 0 && triple_bonds == 0) {
+          // Pyrrole-like: 1-electron lone-pair donor in a 5-member ring.
+          return true;
+        }
       }
 
       std::vector<unsigned int> ring(static_cast<size_t>(aromatic_ring_size));
@@ -945,6 +979,7 @@ class AtomTyper::Impl {
       return "[*]";
     }
 
+
     struct Candidate {
       int degree;
       int h_count;
@@ -1048,7 +1083,12 @@ class AtomTyper::Impl {
     if (at.atom.explicit_charge.has_value()) {
       charges.push_back(*at.atom.explicit_charge);
     } else {
-      const int charge_min = std::min(settings.charge_min, settings.charge_max);
+      int charge_min = std::min(settings.charge_min, settings.charge_max);
+      if (at.atom.atomic_number == 5){
+        charge_min = 0;
+      }
+
+
       const int charge_max = std::max(settings.charge_min, settings.charge_max);
       for (int c = charge_min; c <= charge_max; ++c) {
         charges.push_back(c);
@@ -1089,7 +1129,11 @@ class AtomTyper::Impl {
         degree_values.end());
 
     std::vector<int> single_bond_values;
-    for (int d = at.atom.num_single_bonds; d <= 4 - lower_h_count; ++d) {
+    int min_num_single_bonds = 0;
+    if (at.atom.is_aliphatic && !at.atom.is_aromatic) {
+      min_num_single_bonds = at.atom.num_single_bonds;
+    }
+    for (int d = min_num_single_bonds; d <= 4 - lower_h_count; ++d) {
       single_bond_values.push_back(d);
     }
 
@@ -1176,6 +1220,14 @@ class AtomTyper::Impl {
                   const int degree = single_bonds + double_bonds +
                                      triple_bonds + aromatic_bonds +
                                      lower_h_count;
+                  if (aromflag){
+                    if (degree+h_count < 2 || degree+h_count > 3) {
+                      // if (settings.debug_level == DebugLevel::Verbose) {
+                      //   std::cout << "  Skipping due to aromatic sulfur degree constraint: " << degree << std::endl;
+                      // }
+                      continue;
+                    }
+                  }
 
                   int lower_h = 0;
                   if (at.atom.explicit_lower_h.has_value()) {
@@ -1183,11 +1235,9 @@ class AtomTyper::Impl {
                   }
                   if (at.atom.explicit_X.has_value() &&
                       (degree + h_count) != *at.atom.explicit_X) {
-                    // if (settings.debug_level == DebugLevel::Verbose) {
-                    //   std::cout << "  Skipping due to explicit X constraint:
-                    //   "
-                    //             << *at.atom.explicit_X << std::endl;
-                    // }
+                    if (settings.debug_level == DebugLevel::Verbose) {
+                      std::cout << "  Skipping due to explicit X constraint:" << *at.atom.explicit_X << std::endl;
+                    }
                     continue;
                   }
 
@@ -1418,19 +1468,19 @@ class AtomTyper::Impl {
       out << ";" << ring_constraint_token;
     }
 
-    if (settings.debug_level == DebugLevel::Verbose) {
-      std::cout << "[enumerate_atom_alternatives] ;#alt=" << candidates.size()
-                << std::endl;
-      for (const auto &c : candidates) {
-        std::cout << "[enumerate_atom_alternatives] Candidate: D=" << c.degree
-                  << " H=" << c.h_count << " Charge=" << c.charge
-                  << " Single=" << c.single_bonds
-                  << " Double=" << c.double_bonds
-                  << " Triple=" << c.triple_bonds
-                  << " Aromatic=" << c.aromatic_bonds << " Arom=" << c.arom
-                  << std::endl;
-      }
-    }
+    // if (settings.debug_level == DebugLevel::Verbose) {
+    //   std::cout << "[enumerate_atom_alternatives] ;#alt=" << candidates.size()
+    //             << std::endl;
+    //   for (const auto &c : candidates) {
+    //     std::cout << "[enumerate_atom_alternatives] Candidate: D=" << c.degree
+    //               << " H=" << c.h_count << " Charge=" << c.charge
+    //               << " Single=" << c.single_bonds
+    //               << " Double=" << c.double_bonds
+    //               << " Triple=" << c.triple_bonds
+    //               << " Aromatic=" << c.aromatic_bonds << " Arom=" << c.arom
+    //               << std::endl;
+    //   }
+    // }
 
     if (include_h_terms && all_same_h) {
       out << ";H" << candidates.front().h_count;
@@ -1895,6 +1945,58 @@ std::string AtomTyper::type_atoms_from_smarts(
                   << std::endl;
       }
       continue;
+    }
+
+    // ---- Carry through RecursiveStructure queries from the original atom ----
+    // The generated atom_smarts encodes only flat primitives (D, H, charge,
+    // etc.).  Any $(…) recursive expressions on the original atom would be
+    // lost.  Walk the original query tree, collect RecursiveStructure children,
+    // and graft them onto the replacement query.
+    {
+      using QATOM_QUERY =
+          Queries::Query<int, const RDKit::Atom *, true>;
+      std::vector<QATOM_QUERY *> rec_queries;
+
+      // Recursive collector: walks AND/OR sub-trees of the original query
+      // looking for RecursiveStructure leaves.
+      std::function<void(const QATOM_QUERY *)> collect_recursive;
+      collect_recursive = [&](const QATOM_QUERY *node) {
+        if (!node) {
+          return;
+        }
+        if (node->getDescription() == "RecursiveStructure") {
+          rec_queries.push_back(node->copy());
+          return;
+        }
+        for (auto it = node->beginChildren(); it != node->endChildren(); ++it) {
+          collect_recursive(it->get());
+        }
+      };
+
+      const auto *orig_atom =
+          dynamic_cast<const RDKit::QueryAtom *>(mol->getAtomWithIdx(i));
+      if (orig_atom && orig_atom->getQuery()) {
+        collect_recursive(orig_atom->getQuery());
+      }
+
+      if (!rec_queries.empty()) {
+        // Wrap the existing replacement query + recursive queries in an AND.
+        auto *combined = new RDKit::ATOM_AND_QUERY;
+        combined->setDescription("AtomAnd");
+        combined->addChild(
+            QATOM_QUERY::CHILD_TYPE(src_qatom->getQuery()->copy()));
+        for (auto *rq : rec_queries) {
+          combined->addChild(QATOM_QUERY::CHILD_TYPE(rq));
+        }
+        src_qatom->setQuery(combined);
+        if (verbose) {
+          std::cout
+              << "[type_atoms_from_smarts] Re-attached "
+              << rec_queries.size()
+              << " recursive expression(s) to atom idx " << i << ": "
+              << RDKit::SmartsWrite::GetAtomSmarts(src_qatom) << std::endl;
+        }
+      }
     }
 
     try {
@@ -2380,23 +2482,21 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
     // least one atom-compatibility assignment to exist.
     if ((has_aromatic_arm || has_aliphatic_arm) &&
         !bond_has_compatible_assignment) {
-      return fail(
-          "bond compatibility failure at bond idx=" +
-          std::to_string(bond->getIdx()) +
-          " (begin_idx=" + std::to_string(begin_idx) + "\n" +
-          (has_aliphatic_arm ? "has aliphatic arm" : "no aliphatic arm") +
-          ", end_idx=" + std::to_string(end_idx) + "\n" +
-          (has_aromatic_arm ? "has aromatic arm" : "no aromatic arm") + "\n" +
-          (end_can_aliphatic ? "end can aliphatic" : "no end can aliphatic") +
-          "\n" +
-          (end_can_aromatic ? "end can aromatic" : "no end can aromatic") +
-          "\n" +
-          (begin_can_aliphatic ? "begin can aliphatic"
-                               : "no begin can aliphatic") +
-          "\n" +
-          (begin_can_aromatic ? "begin can aromatic"
-                              : "no begin can aromatic") +
-          "\n" + ") ");
+      return fail("bond compatibility failure at bond idx=" + std::to_string(bond->getIdx()) );
+          // " (begin_idx=" + std::to_string(begin_idx) + "\n" +
+          // (has_aliphatic_arm ? "has aliphatic arm" : "no aliphatic arm") +
+          // ", end_idx=" + std::to_string(end_idx) + "\n" +
+          // (has_aromatic_arm ? "has aromatic arm" : "no aromatic arm") + "\n" +
+          // (end_can_aliphatic ? "end can aliphatic" : "no end can aliphatic") +
+          // "\n" +
+          // (end_can_aromatic ? "end can aromatic" : "no end can aromatic") +
+          // "\n" +
+          // (begin_can_aliphatic ? "begin can aliphatic"
+          //                      : "no begin can aliphatic") +
+          // "\n" +
+          // (begin_can_aromatic ? "begin can aromatic"
+          //                     : "no begin can aromatic") +
+          // "\n" + ") ");
     }
   }
 
@@ -2534,6 +2634,7 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
           //   std::cout << "Trying aromatic flag=" << aromflag << std::endl;
           // }
 
+
           if (pimpl->is_valence_consistent(
                   at, h_count, charge, test_single_bonds, test_double_bonds,
                   test_triple_bonds, test_aromatic_bonds, aromflag,
@@ -2556,6 +2657,8 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
     // This helps tautomeric/prototropic ring systems where a heteroatom can
     // gain one proton with formal +1 while remaining a valid query target.
     if (!any_valid) {
+
+
       const bool ring_member = at.explicit_in_ring.value_or(at.is_in_ring);
       const bool hetero_atom = at.atomic_number > 1 && at.atomic_number != 6;
       const bool allow_charge_plus_one =
@@ -2606,7 +2709,7 @@ bool AtomTyper::is_valid_valence_smarts(const std::string &smarts,
     if (!any_valid) {
       return fail("no valence-consistent assignment for atom idx=" +
                   std::to_string(at.atom_idx) +
-                  " (Z=" + std::to_string(at.atomic_number) + ")");
+                  " (Z=" + std::to_string(at.atomic_number) + ") " + std::to_string(test_single_bonds) + " " + std::to_string(test_double_bonds) + " " + std::to_string(test_triple_bonds) + " " + std::to_string(test_aromatic_bonds) + " " + std::to_string(at.is_aromatic) + " " + std::to_string(at.is_aliphatic) + "  " + std::to_string(at.explicit_H.value_or(-1)));
     }
   }
 

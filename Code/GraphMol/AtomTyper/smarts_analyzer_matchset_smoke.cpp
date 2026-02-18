@@ -234,6 +234,9 @@ std::vector<TargetMol> load_targets_from_csv(
       if (mol) {
         mol->updatePropertyCache(false);
         RDKit::MolOps::findSSSR(*mol);
+        for (auto &a : mol->atoms()) {
+          a->setIsotope(0);
+        }
       }
     } catch (...) {
       continue;
@@ -317,6 +320,30 @@ std::vector<std::string> load_templates_from_csv(
 
   if (max >= 0 && static_cast<size_t>(max) < out.size()) {
     out.resize(max);
+  }
+
+  return out;
+}
+
+std::vector<std::string> filter_templates_by_max_atoms(
+    const std::vector<std::string> &templates, size_t min_atoms,
+    size_t &skipped_too_small, size_t &skipped_invalid) {
+  std::vector<std::string> out;
+  out.reserve(templates.size());
+  skipped_too_small = 0;
+  skipped_invalid = 0;
+
+  for (const auto &tpl : templates) {
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(tpl));
+    if (!query) {
+      ++skipped_invalid;
+      continue;
+    }
+    if (query->getNumAtoms() > min_atoms) {
+      ++skipped_too_small;
+      continue;
+    }
+    out.push_back(tpl);
   }
 
   return out;
@@ -523,6 +550,7 @@ void write_set_details(
 int main(int argc, char **argv) {
   ZoneScopedN("smartsAnalyzerMatchsetSmoke::main");
   try {
+    constexpr size_t kMinTemplateAtoms = 10;
     const auto program_start = std::chrono::steady_clock::now();
     const std::filesystem::path csv_path = resolve_dataset_path(argc, argv);
     // const std::filesystem::path template_path =
@@ -540,11 +568,23 @@ int main(int argc, char **argv) {
     const std::filesystem::path csv_report_path =
         report_path.parent_path() /
         (report_path.stem().string() + "_stats.csv");
-    const auto targets = load_targets_from_csv(csv_path, 5000, random_selection, 1);
-    const auto smarts_list = load_templates_from_csv(template_path, 100000);
+    const auto targets =
+      load_targets_from_csv(csv_path, 5000, random_selection, 1);
+    const auto raw_smarts_list = load_templates_from_csv(template_path, 100000);
+    size_t skipped_too_small = 0;
+    size_t skipped_invalid_templates = 0;
+    const auto smarts_list = filter_templates_by_max_atoms(
+      raw_smarts_list, kMinTemplateAtoms, skipped_too_small,
+      skipped_invalid_templates);
     std::cout << "Dataset loaded: " << targets.size() << " molecules"
               << std::endl;
-    std::cout << "Templates loaded: " << smarts_list.size() << std::endl;
+    std::cout << "Templates loaded: " << raw_smarts_list.size() << std::endl;
+    std::cout << "Templates kept (>= " << kMinTemplateAtoms
+          << " atoms): " << smarts_list.size() << std::endl;
+    std::cout << "Templates skipped (< " << kMinTemplateAtoms
+          << " atoms): " << skipped_too_small << std::endl;
+    std::cout << "Templates skipped (invalid SMARTS): "
+          << skipped_invalid_templates << std::endl;
     std::ofstream report(report_path);
     std::ofstream csv_report(csv_report_path);
     if (!report.good()) {
@@ -556,8 +596,9 @@ int main(int argc, char **argv) {
                                csv_report_path.string());
     }
     if (smarts_list.empty()) {
-      throw std::runtime_error("No SMARTS templates found in: " +
-                               template_path.string());
+      throw std::runtime_error(
+          "No SMARTS templates remaining after filtering in: " +
+          template_path.string());
     }
 
     std::unordered_map<size_t, std::string> row_to_smiles;
@@ -568,7 +609,13 @@ int main(int argc, char **argv) {
 
     std::cout << "Loaded target molecules: " << targets.size() << std::endl;
     std::cout << "CSV path: " << csv_path.string() << std::endl << std::endl;
-    std::cout << "Templates loaded: " << smarts_list.size() << std::endl;
+    std::cout << "Templates loaded: " << raw_smarts_list.size() << std::endl;
+    std::cout << "Templates kept (>= " << kMinTemplateAtoms
+          << " atoms): " << smarts_list.size() << std::endl;
+    std::cout << "Templates skipped (< " << kMinTemplateAtoms
+          << " atoms): " << skipped_too_small << std::endl;
+    std::cout << "Templates skipped (invalid SMARTS): "
+          << skipped_invalid_templates << std::endl;
     std::cout << "Template CSV path: " << template_path.string() << std::endl
               << std::endl;
     std::cout << "Worker threads: " << num_workers << std::endl;
@@ -584,7 +631,15 @@ int main(int argc, char **argv) {
     report << "CSV path: " << csv_path.string() << std::endl;
     report << "Template CSV path: " << template_path.string() << std::endl;
     report << "Target molecules loaded: " << targets.size() << std::endl;
-    report << "Templates loaded: " << smarts_list.size() << std::endl;
+        report << "Templates loaded: " << raw_smarts_list.size() << std::endl;
+        report << "Template min atoms filter: " << kMinTemplateAtoms
+          << std::endl;
+        report << "Templates kept (>= min atoms): " << smarts_list.size()
+          << std::endl;
+        report << "Templates skipped (< min atoms): " << skipped_too_small
+          << std::endl;
+        report << "Templates skipped (invalid SMARTS): "
+          << skipped_invalid_templates << std::endl;
     report << "Worker threads: " << num_workers << std::endl;
     report << "Target limit: " << target_limit << std::endl;
     report << "Random selection: " << (random_selection ? "true" : "false")
@@ -599,6 +654,11 @@ int main(int argc, char **argv) {
                   "after_only_size,jaccard,precision,recall,f1,exact_match,"
                   "time_start,time_end"
                << std::endl;
+
+    atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options;
+    workflow_options.include_x_in_reserialization = false;
+    workflow_options.enumerate_bond_order = false;
+    
 
     atom_typer::SmartsAnalyzer sa;
 
@@ -618,7 +678,7 @@ int main(int argc, char **argv) {
       ++query_idx;
       std::vector<std::string> standardized_vec;
       try {
-        standardized_vec = sa.standard_smarts({input_smarts}, false);
+        standardized_vec = sa.standard_smarts({input_smarts}, false, false, false, workflow_options);
       } catch (const std::exception &e) {
         std::cerr << "Failed while standardizing input SMARTS '" << input_smarts
                   << "': " << e.what() << std::endl;

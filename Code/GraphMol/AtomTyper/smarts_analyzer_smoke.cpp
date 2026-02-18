@@ -47,7 +47,11 @@ int main() {
       // "[$([!#1!#6]1~[#6]=[#6]~1)]",
       // "[!#1!#6]1=[#6]~[#6]~1",
       // "[!#1!#6]1~[#6]=[#6]~1",
-      "[#16X2H][C,N;H1]"
+      "[cR1]"
+      // "[cR1]1[cR1][cR1][cR1][cR1][cR1]1"
+      // "[#6]:[#8&$(a1aaaa1)]"
+      // "[#6X3](=[SX1])([!N])[!N]"
+      // "[#16X2H][C,N;H1]"
       // "[#16X2H]"
       // "[NR1]1=[CR1][CR1][CR1][CR1]1"
       // "[SR1]1[SR1][CR1]=[CR1][CR1]1",
@@ -88,9 +92,9 @@ int main() {
   atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options;
   workflow_options.include_x_in_reserialization = false;
   workflow_options.enumerate_bond_order = false;
-  log_options.flags = atom_typer::SmartsAnalyzer::LogRecanonComparisons | atom_typer::SmartsAnalyzer::LogSummary | atom_typer::SmartsAnalyzer::LogVariants | atom_typer::SmartsAnalyzer::LogFinal |  atom_typer::SmartsAnalyzer::LogValidation | atom_typer::SmartsAnalyzer::LogRecanon;
+  log_options.flags = atom_typer::SmartsAnalyzer::LogAtomTyping | atom_typer::SmartsAnalyzer::LogSummary | atom_typer::SmartsAnalyzer::LogVariants | atom_typer::SmartsAnalyzer::LogFinal |  atom_typer::SmartsAnalyzer::LogValidation | atom_typer::SmartsAnalyzer::LogRecanon;
   log_options.enabled = true;
-  // atom_typer::SmartsAnalyzer::LogAtomTyping
+  // atom_typer::SmartsAnalyzer::LogRecanonComparisons
   try {
     results = sa.standard_smarts(smarts_list, false, false, false,
                                  workflow_options, log_options);
@@ -131,6 +135,17 @@ int main() {
           break;
         }
       }
+
+      std::cout << "\nafter-only rows" << std::endl;
+      int iii = 0;
+      for (const auto &row_smiles : bench.final_only_rows) {
+        std::cout << row_smiles.second << std::endl;
+        if (++iii >= 10) {
+          std::cout << "... (truncated)" << std::endl;
+          break;
+        }
+      }
+
     } catch (const std::exception &e) {
       std::cerr << "benchmark error: " << e.what() << std::endl;
     }
