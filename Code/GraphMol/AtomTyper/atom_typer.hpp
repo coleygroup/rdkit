@@ -147,7 +147,8 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
                                    bool map_new_atoms, int &max_amap,
                                    bool verbose=false,
                                    bool include_x_in_reserialization=false,
-                                   bool enumerate_bond_order=true);
+                                   bool enumerate_bond_order=true,
+                                   unsigned int forced_primitives_mask=0u);
 
   /**
    * Overload: enumerate DOF SMARTS using custom default ranges for H and
@@ -157,7 +158,8 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
                                    int h_max, int charge_min, int charge_max,
                                    bool map_new_atoms, int &max_amap,
                                    bool include_x_in_reserialization=false,
-                                   bool enumerate_bond_order=true);
+                                   bool enumerate_bond_order=true,
+                                   unsigned int forced_primitives_mask=0u);
 
   /**
    * Overload: enumerate with custom ranges plus runtime verbosity controls.
@@ -168,7 +170,8 @@ class RDKIT_ATOMTYPER_EXPORT AtomTyper {
                                    bool verbose, DebugLevel debug_level,
                                    bool map_new_atoms, int &max_amap,
                                    bool include_x_in_reserialization=false,
-                                   bool enumerate_bond_order=true);
+                                   bool enumerate_bond_order=true,
+                                   unsigned int forced_primitives_mask=0u);
   // Overload: enumerate with custom debug level but default H/charge ranges and
   // verbosity=true
   std::string type_atoms_from_smarts(const std::string &smarts,

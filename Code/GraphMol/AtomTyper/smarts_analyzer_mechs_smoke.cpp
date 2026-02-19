@@ -133,7 +133,7 @@ std::filesystem::path resolve_templates_path(int argc, char **argv) {
 
   const std::vector<std::filesystem::path> candidates = {
       std::filesystem::path(
-          "/home/bmahjour/test_rdpp/rdkit/Code/GraphMol/AtomTyper/noncanon_efg_templates_20240108.csv"),
+          "/home/bmahjour/test_rdpp/rdkit/Code/GraphMol/AtomTyper/mechanism_reactants.csv"),
       std::filesystem::path(
           "C:\\Projects\\atype\\rdkit\\Code\\GraphMol\\AtomTyper\\noncanon_efg_templates_20240108.csv"),
       std::filesystem::path(
@@ -267,7 +267,7 @@ std::vector<TargetMol> load_targets_from_csv(
 }
 
 std::vector<std::string> load_templates_from_csv(
-    const std::filesystem::path &path, int max = -1) {
+    const std::filesystem::path &path, std::string column, int max = -1) {
   std::ifstream in(path);
   if (!in.good()) {
     throw std::runtime_error("Failed to open template CSV file: " +
@@ -295,7 +295,7 @@ std::vector<std::string> load_templates_from_csv(
       bool has_header = false;
       for (size_t i = 0; i < fields.size(); ++i) {
         const std::string low = to_lower(fields[i]);
-        if (low.find("noncanon_efg_templates") != std::string::npos ||
+        if (low.find(column) != std::string::npos ||
             low.find("template") != std::string::npos ||
             low.find("smarts") != std::string::npos) {
           template_col = static_cast<int>(i);
@@ -580,7 +580,15 @@ int main(int argc, char **argv) {
         (report_path.stem().string() + "_stats.csv");
     const auto targets =
       load_targets_from_csv(csv_path, 10000, random_selection, 1);
-    const auto raw_smarts_list = load_templates_from_csv(template_path, 100000);
+    const auto raw_smarts_list_1 = load_templates_from_csv(template_path, "smarts_reactant", 100000);
+    const auto raw_smarts_list_2 = load_templates_from_csv(template_path, "smarts_product", 100000);
+    std::vector<std::string> raw_smarts_list = raw_smarts_list_1;
+
+    raw_smarts_list.insert(
+        raw_smarts_list.end(),
+        raw_smarts_list_2.begin(),
+        raw_smarts_list_2.end()
+    );
     size_t skipped_too_small = 0;
     size_t skipped_invalid_templates = 0;
     const auto smarts_list = filter_templates_by_max_atoms(
@@ -668,7 +676,11 @@ int main(int argc, char **argv) {
     atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options;
     workflow_options.include_x_in_reserialization = false;
     workflow_options.enumerate_bond_order = false;
-    
+    workflow_options.rewrite_or_primitives_to_negated = true;
+    workflow_options.or_primitive_rewrite_atomic_nums = {6};
+    // workflow_options.remove_aa_wildcard = true;
+    // workflow_options.extracted_primitives_mask = atom_typer::SmartsAnalyzer::ExtractPrimitiveCharge | atom_typer::SmartsAnalyzer::ExtractPrimitiveD | atom_typer::SmartsAnalyzer::ExtractPrimitiveX;
+
 
     atom_typer::SmartsAnalyzer sa;
 

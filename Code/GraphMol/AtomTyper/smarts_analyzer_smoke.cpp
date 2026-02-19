@@ -49,7 +49,29 @@ int main() {
       // "[!#1!#6]1~[#6]=[#6]~1",
       // "[cR1]"
       // "[C!R]"
-      "[C;X3;+1]"
+      // "[C;X3;+1]"
+      // "c[NX3H1][CX4&!$([CX4]([NX3H1])[O,N,S,P])]",
+      // "c[OX2&!$([OX2r3])]c"
+      "[Cl,$([O]-[S]),Br,I;H1;+0:1]"
+      // "[#6;H1;+0:1].[#12;+0:2][F,Cl,Br,I;H0:3]",
+      // "[BX3]([#6])([OX2][#6])[H,!#6]",
+      // "[$([Cv4X4]([!#1!#6])([!#1!#6])([!#1!#6])[!#1!#6]),$([CX3](=[!#1!#6])([!#1!#6])[!#1!#6]),$([CX2](=[!#1!#6])=[!#1!#6]),$([CX2](#[!#1!#6])[!#1!#6])]",
+      // "[OH1][CX3](=[OX1])[CX4]([#1,#6])([#1,#6])[NH2,$([NH1]([#6])[#6])&!$([NH1](CC(=O)[OH1])[CX3]=[OX1,SX1])]"
+      // "[#6:1]-[C:2](=[O:3])-[O:4]-[O:5]-[C:6](-[#6:7])=[O:8]"
+      // "[CX4,CX3,c;!$([#6]=[OX1])][F,Cl,Br,I]"
+      // "[H][CX3]([#1,#6])=[OX1]"
+
+    // "[O:1]([C:2]=[C:3])[C:4][C:5]=[C:6]"
+      // "[#6:1](=[#8:2])-[#8;-1;H0:3]"
+      // "[#1,#6][CX3](=[NX2][#1,#6])[OX2][#6&!$([CX3]=[OX1,SX1,NX2,C])]",
+      // "[#6&!$(C#N)][CX3](=[OX1])[#6&!$(C#N)]",
+      // "[$([CX4][OH1])&!$(C([OH1])[#7,#8,#15,#16,F,Cl,Br,I])]"
+
+
+      // "[$([#6][CH2][OH1]),$([CH3][OH1])]"
+      // "a[F,Cl,Br,I]"
+      // "[CH2,$([CH1][#6]),$([CX4]([#6])[#6])]([OH1])[OH1]"
+      // "[#6X3](=[SX1])([!N])[!N]"
       // "[#6,N&+1]#[#7]"
       // "[C;X4;!D4]-;!@[C;D3]"
       // "[#16!H0]"
@@ -101,11 +123,13 @@ int main() {
   atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options;
   workflow_options.include_x_in_reserialization = false;
   workflow_options.enumerate_bond_order = false;
-  log_options.flags = atom_typer::SmartsAnalyzer::LogAtomTyping | atom_typer::SmartsAnalyzer::LogSummary | atom_typer::SmartsAnalyzer::LogVariants | atom_typer::SmartsAnalyzer::LogFinal |  atom_typer::SmartsAnalyzer::LogValidation | atom_typer::SmartsAnalyzer::LogRecanon;
+  log_options.flags =  atom_typer::SmartsAnalyzer::LogSummary | atom_typer::SmartsAnalyzer::LogVariants | atom_typer::SmartsAnalyzer::LogFinal |  atom_typer::SmartsAnalyzer::LogValidation | atom_typer::SmartsAnalyzer::LogRecanon;
   log_options.enabled = true;
-  // atom_typer::SmartsAnalyzer::LogRecanonComparisons
+  workflow_options.remove_aa_wildcard = true;
+  // workflow_options.extracted_primitives_mask = atom_typer::SmartsAnalyzer::ExtractPrimitiveCharge | atom_typer::SmartsAnalyzer::ExtractPrimitiveD;
+  // atom_typer::SmartsAnalyzer::LogRecanonComparisons | atom_typer::SmartsAnalyzer::LogAtomTyping
   try {
-    results = sa.standard_smarts(smarts_list, false, false, false,
+    results = sa.standard_smarts(smarts_list, false, false, true,
                                  workflow_options, log_options);
   } catch (const std::exception &e) {
     std::cerr << "!!! Error during SMARTS analysis: " << e.what() << std::endl;

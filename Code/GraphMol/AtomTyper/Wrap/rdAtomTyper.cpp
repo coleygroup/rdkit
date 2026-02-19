@@ -192,7 +192,16 @@ python::object typeSmarts(const python::object &smarts_or_list,
                           bool catchErrors = true,
                           bool enumerate_bond_order = true,
                           bool log_enabled = false,
-                          unsigned int log_flags = atom_typer::SmartsAnalyzer::LogAll) {
+                          unsigned int log_flags = atom_typer::SmartsAnalyzer::LogAll,
+                          unsigned int extracted_primitives_mask = atom_typer::SmartsAnalyzer::ExtractPrimitiveNone,
+                          const python::object &factoring_priority = python::object(),
+                            bool remove_aa_wildcard = true,
+                          atom_typer::SmartsAnalyzer::SymbolForm symbol_form =
+                              atom_typer::SmartsAnalyzer::SymbolForm::Unchanged,
+                          bool fold_singleton_or = false,
+                            bool explicit_charge_values = false,
+                            const python::object &or_primitive_rewrite_atomic_nums =
+                              python::object()) {
   std::vector<std::string> inputs;
 
   if (PyUnicode_Check(smarts_or_list.ptr())) {
@@ -210,9 +219,35 @@ python::object typeSmarts(const python::object &smarts_or_list,
     python::throw_error_already_set();
   }
 
+  std::vector<std::string> factoring_priority_vec;
+  if (factoring_priority.ptr() != Py_None) {
+    python::stl_input_iterator<std::string> begin(factoring_priority), end;
+    for (auto it = begin; it != end; ++it) {
+      factoring_priority_vec.push_back(*it);
+    }
+  }
+
+  std::vector<int> rewrite_atomic_nums_vec;
+  if (or_primitive_rewrite_atomic_nums.ptr() != Py_None) {
+    python::stl_input_iterator<int> begin(or_primitive_rewrite_atomic_nums),
+        end;
+    for (auto it = begin; it != end; ++it) {
+      rewrite_atomic_nums_vec.push_back(*it);
+    }
+  }
+
   atom_typer::SmartsAnalyzer analyzer;
   atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options(
-      include_x_in_reserialization, enumerate_bond_order);
+      include_x_in_reserialization, enumerate_bond_order,
+      extracted_primitives_mask, std::move(factoring_priority_vec));
+  workflow_options.remove_aa_wildcard = remove_aa_wildcard;
+  workflow_options.symbol_form = symbol_form;
+  workflow_options.fold_singleton_or = fold_singleton_or;
+  workflow_options.explicit_charge_values = explicit_charge_values;
+    workflow_options.rewrite_or_primitives_to_negated =
+      !rewrite_atomic_nums_vec.empty();
+    workflow_options.or_primitive_rewrite_atomic_nums =
+      std::move(rewrite_atomic_nums_vec);
   atom_typer::SmartsAnalyzer::StandardSmartsLogOptions log_options(
       log_enabled, log_flags);
   auto standardized = analyzer.standard_smarts(
@@ -240,6 +275,11 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
       .value("STANDARD", atom_typer::Level::STANDARD)
       .value("DETAILED", atom_typer::Level::DETAILED)
       .value("COMPLETE", atom_typer::Level::COMPLETE);
+
+  python::enum_<atom_typer::SmartsAnalyzer::SymbolForm>("SymbolForm")
+      .value("Unchanged", atom_typer::SmartsAnalyzer::SymbolForm::Unchanged)
+      .value("Expanded",  atom_typer::SmartsAnalyzer::SymbolForm::Expanded)
+      .value("Condensed", atom_typer::SmartsAnalyzer::SymbolForm::Condensed);
 
     python::enum_<atom_typer::DebugLevel>("DebugLevel")
       .value("Off", atom_typer::DebugLevel::Off)
@@ -337,6 +377,25 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
 
   python::scope().attr("LOG_ALL") = atom_typer::SmartsAnalyzer::LogAll;
 
+  python::scope().attr("EXTRACT_PRIMITIVE_NONE") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveNone;
+  python::scope().attr("EXTRACT_PRIMITIVE_H") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveH;
+  python::scope().attr("EXTRACT_PRIMITIVE_D") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveD;
+  python::scope().attr("EXTRACT_PRIMITIVE_X") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveX;
+  python::scope().attr("EXTRACT_PRIMITIVE_CHARGE") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveCharge;
+  python::scope().attr("EXTRACT_PRIMITIVE_V") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveV;
+  python::scope().attr("EXTRACT_PRIMITIVE_RING_COUNT") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveRingCount;
+  python::scope().attr("EXTRACT_PRIMITIVE_RING_SIZE") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveRingSize;
+  python::scope().attr("EXTRACT_PRIMITIVE_RING_BOND_COUNT") =
+      atom_typer::SmartsAnalyzer::ExtractPrimitiveRingBondCount;
+
   python::def(
       "type_smarts", &typeSmarts,
       (python::arg("smarts_or_list"), python::arg("verbose") = false,
@@ -345,7 +404,16 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
        python::arg("catchErrors") = true,
        python::arg("enumerate_bond_order") = false,
        python::arg("log_enabled") = false,
-       python::arg("log_flags") = atom_typer::SmartsAnalyzer::LogAll),
+       python::arg("log_flags") = atom_typer::SmartsAnalyzer::LogAll,
+       python::arg("extracted_primitives_mask") =
+           atom_typer::SmartsAnalyzer::ExtractPrimitiveNone,
+       python::arg("factoring_priority") = python::object(),
+         python::arg("remove_aa_wildcard") = true,
+       python::arg("symbol_form") =
+           atom_typer::SmartsAnalyzer::SymbolForm::Unchanged,
+       python::arg("fold_singleton_or") = false,
+         python::arg("explicit_charge_values") = false,
+         python::arg("or_primitive_rewrite_atomic_nums") = python::object()),
       "Standardize SMARTS via SmartsAnalyzer::standard_smarts.\n"
       "Accepts either a single SMARTS string or an iterable of SMARTS strings.\n\n"
       "Parameters:\n"
@@ -356,7 +424,19 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
       "  catchErrors: catch and skip errors (default True)\n"
       "  enumerate_bond_order: enumerate bond-order variants (default False)\n"
       "  log_enabled: enable logging (default False)\n"
-      "  log_flags: bitmask controlling log categories (default LOG_ALL)\n");
+      "  log_flags: bitmask controlling log categories (default LOG_ALL)\n"
+      "  extracted_primitives_mask: bitmask of primitives to extract\n"
+      "      (default EXTRACT_PRIMITIVE_NONE, combine with |)\n"
+      "  factoring_priority: list of SMARTS primitives for factoring order\n"
+      "      (default None)\n"
+      "  remove_aa_wildcard: remove OR(A,a) aromaticity tautologies (default True)\n"
+      "  symbol_form: SymbolForm.Unchanged / Expanded (C->[#6&A]) /\n"
+      "      Condensed ([#6&A]->C) (default Unchanged)\n"
+      "  fold_singleton_or: collapse single-arm OR nodes (default False)\n"
+      "  explicit_charge_values: expand +/-/++/-- to +1/-1/+2/-2 (default False)\n"
+      "  or_primitive_rewrite_atomic_nums: iterable of atomic numbers where\n"
+      "      OR->negated primitive rewrites are enabled\n"
+      "      (e.g. [6] for carbon only; default None/empty = disabled)\n");
 
     python::def(
       "type_smiles", &typeSmiles,
