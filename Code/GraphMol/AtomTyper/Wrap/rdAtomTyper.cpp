@@ -189,7 +189,10 @@ python::object typeSmarts(const python::object &smarts_or_list,
                           bool verbose = false,
                           bool include_x_in_reserialization = false,
                           bool ignoreValence = false,
-                          bool catchErrors = true) {
+                          bool catchErrors = true,
+                          bool enumerate_bond_order = true,
+                          bool log_enabled = false,
+                          unsigned int log_flags = atom_typer::SmartsAnalyzer::LogAll) {
   std::vector<std::string> inputs;
 
   if (PyUnicode_Check(smarts_or_list.ptr())) {
@@ -208,9 +211,13 @@ python::object typeSmarts(const python::object &smarts_or_list,
   }
 
   atom_typer::SmartsAnalyzer analyzer;
+  atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options(
+      include_x_in_reserialization, enumerate_bond_order);
+  atom_typer::SmartsAnalyzer::StandardSmartsLogOptions log_options(
+      log_enabled, log_flags);
   auto standardized = analyzer.standard_smarts(
-      inputs, verbose, include_x_in_reserialization, ignoreValence,
-      catchErrors);
+      inputs, verbose, ignoreValence, catchErrors,
+      workflow_options, log_options);
 
   if (PyUnicode_Check(smarts_or_list.ptr())) {
     if (standardized.empty()) {
@@ -328,13 +335,28 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
   python::def("smiles_to_smarts", &atom_typer::smiles_to_smarts,
               (python::arg("smiles"), python::arg("level")));
 
+  python::scope().attr("LOG_ALL") = atom_typer::SmartsAnalyzer::LogAll;
+
   python::def(
       "type_smarts", &typeSmarts,
       (python::arg("smarts_or_list"), python::arg("verbose") = false,
        python::arg("include_x_in_reserialization") = false,
        python::arg("ignoreValence") = false,
-       python::arg("catchErrors") = true),
-      "Standardize SMARTS via SmartsAnalyzer::standard_smarts. Accepts either a single SMARTS string or an iterable of SMARTS strings.");
+       python::arg("catchErrors") = true,
+       python::arg("enumerate_bond_order") = false,
+       python::arg("log_enabled") = false,
+       python::arg("log_flags") = atom_typer::SmartsAnalyzer::LogAll),
+      "Standardize SMARTS via SmartsAnalyzer::standard_smarts.\n"
+      "Accepts either a single SMARTS string or an iterable of SMARTS strings.\n\n"
+      "Parameters:\n"
+      "  smarts_or_list: str or iterable of str\n"
+      "  verbose: print debug info (default False)\n"
+      "  include_x_in_reserialization: include [#0] in output (default False)\n"
+      "  ignoreValence: skip valence checks (default False)\n"
+      "  catchErrors: catch and skip errors (default True)\n"
+      "  enumerate_bond_order: enumerate bond-order variants (default False)\n"
+      "  log_enabled: enable logging (default False)\n"
+      "  log_flags: bitmask controlling log categories (default LOG_ALL)\n");
 
     python::def(
       "type_smiles", &typeSmiles,
