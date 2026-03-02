@@ -8,6 +8,13 @@
 #include <GraphMol/AtomTyper/atom_typer.hpp>
 #include <GraphMol/AtomTyper/smarts_analyzer.hpp>
 #include <GraphMol/AtomTyper/expression_builder.hpp>
+#include <GraphMol/GraphMol.h>
+#include <GraphMol/QueryAtom.h>
+#include <GraphMol/QueryBond.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
+#include <GraphMol/SmilesParse/SmartsWrite.h>
+#include <GraphMol/MolOps.h>
+#include <GraphMol/QueryOps.h>
 
 namespace python = boost::python;
 
@@ -263,6 +270,189 @@ python::object typeSmarts(const python::object &smarts_or_list,
   return vectorStringToList(standardized);
 }
 
+// ---------------------------------------------------------------------------
+// Query-tree serialisation: walk RDKit's atom/bond query trees and return
+// them as plain Python dicts so the visualiser frontend can render them.
+// ---------------------------------------------------------------------------
+
+using ATOM_QUERY = Queries::Query<int, const RDKit::Atom *, true>;
+using BOND_QUERY = Queries::Query<int, const RDKit::Bond *, true>;
+
+// Forward declaration
+python::dict walkAtomQuery(const ATOM_QUERY *q);
+
+python::dict walkAtomQuery(const ATOM_QUERY *q) {
+  python::dict d;
+  if (!q) {
+    d["description"] = "AtomNull";
+    d["op"] = "leaf";
+    return d;
+  }
+  const auto &desc = q->getDescription();
+  d["description"] = desc;
+  d["negated"] = q->getNegation();
+
+  // Classify the node
+  if (desc == "AtomAnd" || desc == "And") {
+    d["op"] = "and";
+  } else if (desc == "AtomOr" || desc == "Or") {
+    d["op"] = "or";
+  } else if (desc == "AtomNot" || desc == "Not") {
+    d["op"] = "not";
+  } else if (desc == "RecursiveSmarts" || desc == "RecursiveStructure") {
+    d["op"] = "recursive";
+  } else {
+    d["op"] = "leaf";
+    // Try to extract the integer value via ATOM_EQUALS_QUERY
+    try {
+      const auto *eq =
+          dynamic_cast<const Queries::EqualityQuery<int, const RDKit::Atom *, true> *>(q);
+      if (eq) {
+        d["value"] = eq->getVal();
+      }
+    } catch (...) {
+      // not an equality query – leave value unset
+    }
+  }
+
+  // Recurse into children
+  python::list children;
+  for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+    children.append(walkAtomQuery(it->get()));
+  }
+  if (python::len(children) > 0) {
+    d["children"] = children;
+  }
+  return d;
+}
+
+python::dict walkBondQuery(const BOND_QUERY *q) {
+  python::dict d;
+  if (!q) {
+    d["description"] = "BondNull";
+    d["op"] = "leaf";
+    return d;
+  }
+  const auto &desc = q->getDescription();
+  d["description"] = desc;
+  d["negated"] = q->getNegation();
+
+  if (desc == "BondAnd" || desc == "And") {
+    d["op"] = "and";
+  } else if (desc == "BondOr" || desc == "Or") {
+    d["op"] = "or";
+  } else if (desc == "BondNot" || desc == "Not") {
+    d["op"] = "not";
+  } else {
+    d["op"] = "leaf";
+    try {
+      const auto *eq =
+          dynamic_cast<const Queries::EqualityQuery<int, const RDKit::Bond *, true> *>(q);
+      if (eq) {
+        d["value"] = eq->getVal();
+      }
+    } catch (...) {}
+  }
+
+  python::list children;
+  for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+    children.append(walkBondQuery(it->get()));
+  }
+  if (python::len(children) > 0) {
+    d["children"] = children;
+  }
+  return d;
+}
+
+/**
+ * Parse a SMARTS string and return a dict containing all atom and bond
+ * query trees.  This is the main entry point for the visualiser frontend.
+ *
+ * Returns: {
+ *   "smarts": <canonical SMARTS>,
+ *   "atoms": [
+ *     { "idx": 0, "atom_map": 0, "smarts_token": "[#6]",
+ *       "query_tree": { ... }, "neighbors": [1, 2] },
+ *     ...
+ *   ],
+ *   "bonds": [
+ *     { "idx": 0, "begin_atom_idx": 0, "end_atom_idx": 1,
+ *       "bond_query": { ... } },
+ *     ...
+ *   ]
+ * }
+ */
+python::dict querymolFromSmarts(const std::string &smarts) {
+  python::dict result;
+  auto *mol = RDKit::SmartsToMol(smarts);
+  if (!mol) {
+    throw std::runtime_error("Invalid SMARTS: " + smarts);
+  }
+  std::unique_ptr<RDKit::ROMol> mol_owner(mol);
+
+  // Property cache and ring info
+  try { mol->updatePropertyCache(false); } catch (...) {}
+  RDKit::MolOps::fastFindRings(*mol);
+
+  result["smarts"] = RDKit::MolToSmarts(*mol);
+
+  // --- Atoms ---
+  python::list atoms;
+  for (const auto *atom : mol->atoms()) {
+    python::dict ad;
+    ad["idx"] = static_cast<int>(atom->getIdx());
+    ad["atom_map"] = atom->getAtomMapNum();
+
+    // Get this atom's SMARTS token
+    if (atom->hasQuery()) {
+      ad["smarts_token"] = RDKit::SmartsWrite::GetAtomSmarts(
+          static_cast<const RDKit::QueryAtom *>(atom));
+    } else {
+      ad["smarts_token"] = std::string("?");
+    }
+
+    // Walk query tree
+    const auto *query = atom->getQuery();
+    ad["query_tree"] = walkAtomQuery(
+        static_cast<const ATOM_QUERY *>(query));
+
+    // Neighbors
+    python::list nbrs;
+    for (const auto *nbr : mol->atomNeighbors(atom)) {
+      nbrs.append(static_cast<int>(nbr->getIdx()));
+    }
+    ad["neighbors"] = nbrs;
+
+    atoms.append(ad);
+  }
+  result["atoms"] = atoms;
+
+  // --- Bonds ---
+  python::list bonds;
+  for (const auto *bond : mol->bonds()) {
+    python::dict bd;
+    bd["idx"] = static_cast<int>(bond->getIdx());
+    bd["begin_atom_idx"] = static_cast<int>(bond->getBeginAtomIdx());
+    bd["end_atom_idx"] = static_cast<int>(bond->getEndAtomIdx());
+
+    if (bond->hasQuery()) {
+      bd["bond_query"] = walkBondQuery(
+          static_cast<const BOND_QUERY *>(bond->getQuery()));
+    } else {
+      python::dict bq;
+      bq["description"] = "BondOrder";
+      bq["op"] = "leaf";
+      bq["value"] = static_cast<int>(bond->getBondType());
+      bq["negated"] = false;
+      bd["bond_query"] = bq;
+    }
+    bonds.append(bd);
+  }
+  result["bonds"] = bonds;
+
+  return result;
+}
+
 }  // namespace
 
 BOOST_PYTHON_MODULE(rdAtomTyper) {
@@ -443,4 +633,13 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
       (python::arg("smiles_or_list"), python::arg("use_canonical") = true,
        python::arg("reserialize") = true),
       "Type SMILES via AtomTyper::type_atoms_from_smiles. Accepts a single SMILES string or an iterable of SMILES strings. If reserialize=True, returns a typed SMARTS-like string reconstructed from PatternItem atom/bond tokens instead of AtomType objects.");
+
+    python::def(
+      "querymol_from_smarts", &querymolFromSmarts,
+      (python::arg("smarts")),
+      "Parse a SMARTS string and return a dict containing atom and bond\n"
+      "query trees.  Each atom entry includes the full query tree as a\n"
+      "nested dict with keys: description, op (and/or/not/leaf/recursive),\n"
+      "negated, value (for leaf nodes), and children.\n\n"
+      "Returns a dict with keys: smarts, atoms, bonds.\n");
 }

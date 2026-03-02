@@ -58,6 +58,12 @@ RDKIT_SMILESPARSE_EXPORT std::string MolFragmentToSmarts(
     const std::vector<int> &atomsToUse,
     const std::vector<int> *bondsToUse = nullptr);
 
+RDKIT_SMILESPARSE_EXPORT std::string MolFragmentToSmarts(
+  const ROMol &mol, const SmilesWriteParams &params,
+  const std::vector<int> &atomsToUse, const std::vector<int> *bondsToUse,
+  const std::vector<std::string> *atomSymbols,
+  const std::vector<std::string> *bondSymbols);
+
 //! returns the CXSMARTS for a molecule
 RDKIT_SMILESPARSE_EXPORT std::string MolToCXSmarts(
     const ROMol &mol, const SmilesWriteParams &params);
@@ -66,6 +72,12 @@ RDKIT_SMILESPARSE_EXPORT std::string MolFragmentToCXSmarts(
     const ROMol &mol, const SmilesWriteParams &params,
     const std::vector<int> &atomsToUse,
     const std::vector<int> *bondsToUse = nullptr);
+
+RDKIT_SMILESPARSE_EXPORT std::string MolFragmentToCXSmarts(
+  const ROMol &mol, const SmilesWriteParams &params,
+  const std::vector<int> &atomsToUse, const std::vector<int> *bondsToUse,
+  const std::vector<std::string> *atomSymbols,
+  const std::vector<std::string> *bondSymbols);
 
 inline std::string MolFragmentToSmarts(
     const ROMol &mol, const std::vector<int> &atomsToUse,

@@ -539,7 +539,14 @@ These cannot currently be constructed directly from Python\n";
               python::arg("maintainOrder") = true),
              "combines the query from other with ours")
         .def("SetQuery", setQuery, (python::arg("self"), python::arg("other")),
-             "Replace our query with a copy of the other query");
+             "Replace our query with a copy of the other query")
+        .def("GetQuery", &QueryAtom::getQuery,
+             python::return_value_policy<python::reference_existing_object>(),
+             python::args("self"),
+               "Returns the query associated with this atom, or None if there is "
+               "no query.\n\n"
+               "  NOTE: the returned query is owned by the Atom and should not be "
+               "modified or deleted.\n");
 
     python::def(
         "GetAtomRLabel", getAtomRLabel, (python::arg("atom")),

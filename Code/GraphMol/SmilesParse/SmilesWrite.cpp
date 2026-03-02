@@ -884,6 +884,7 @@ std::string MolFragmentToSmiles(const ROMol &mol,
   for (auto aidx : atomsToUse) {
     atomsInPlay.set(aidx);
   }
+  // cout << "atomsInPlay: " << atomsInPlay << endl;
   // figure out which bonds are actually in play:
   boost::dynamic_bitset<> bondsInPlay(mol.getNumBonds(), 0);
   if (bondsToUse) {
@@ -905,6 +906,7 @@ std::string MolFragmentToSmiles(const ROMol &mol,
       }
     }
   }
+  // std::cout << "bondsInPlay: " << bondsInPlay << std::endl;
 
   // copy over the rings that only involve atoms/bonds in this fragment:
   if (mol.getRingInfo()->isInitialized()) {
@@ -933,11 +935,11 @@ std::string MolFragmentToSmiles(const ROMol &mol,
       }
     }
   }
-  if (tmol.needsUpdatePropertyCache()) {
-    for (auto atom : tmol.atoms()) {
-      atom->updatePropertyCache(false);
-    }
-  }
+  // if (tmol.needsUpdatePropertyCache()) {
+  //   for (auto atom : tmol.atoms()) {
+  //     atom->updatePropertyCache(false);
+  //   }
+  // }
 
   UINT_VECT ranks(tmol.getNumAtoms());
 

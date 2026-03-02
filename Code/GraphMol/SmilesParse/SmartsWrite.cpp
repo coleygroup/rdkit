@@ -664,7 +664,9 @@ std::string FragmentSmartsConstruct(
     UINT_VECT &ranks, const SmilesWriteParams &params,
     std::vector<unsigned int> &atomOrdering,
     std::vector<unsigned int> &bondOrdering,
-    const boost::dynamic_bitset<> *bondsInPlay) {
+  const boost::dynamic_bitset<> *bondsInPlay,
+  const std::vector<std::string> *atomSymbols = nullptr,
+  const std::vector<std::string> *bondSymbols = nullptr) {
   // this is dirty trick get around the fact that canonicalizeFragment
   // thinks we already called findSSSR - to do some atom ranking
   // but for smarts we are going to ignore that part. We will artificially
@@ -682,7 +684,7 @@ std::string FragmentSmartsConstruct(
   Canon::MolStack molStack;
   molStack.reserve(mol.getNumAtoms() + mol.getNumBonds());
   Canon::canonicalizeFragment(mol, atomIdx, colors, ranks, molStack,
-                              bondsInPlay, nullptr, params.doIsomericSmiles,
+                              bondsInPlay, bondSymbols, params.doIsomericSmiles,
                               doRandom, doChiralInversions);
 
   // now clear the "SSSR" property
@@ -693,13 +695,21 @@ std::string FragmentSmartsConstruct(
     switch (msCI.type) {
       case Canon::MOL_STACK_ATOM: {
         auto *atm = msCI.obj.atom;
-        res << SmartsWrite::GetAtomSmarts(atm, params);
+        if (!atomSymbols) {
+          res << SmartsWrite::GetAtomSmarts(atm, params);
+        } else {
+          res << (*atomSymbols)[atm->getIdx()];
+        }
         atomOrdering.push_back(atm->getIdx());
         break;
       }
       case Canon::MOL_STACK_BOND: {
         auto *bnd = msCI.obj.bond;
-        res << SmartsWrite::GetBondSmarts(bnd, params, msCI.number);
+        if (!bondSymbols) {
+          res << SmartsWrite::GetBondSmarts(bnd, params, msCI.number);
+        } else {
+          res << (*bondSymbols)[bnd->getIdx()];
+        }
         bondOrdering.push_back(bnd->getIdx());
         break;
       }
@@ -826,7 +836,9 @@ std::string getNonQueryBondSmarts(const Bond *qbond, int atomToLeftIdx,
 
 std::string molToSmarts(const ROMol &inmol, const SmilesWriteParams &params,
                         std::vector<AtomColors> &&colors,
-                        const boost::dynamic_bitset<> *bondsInPlay) {
+                        const boost::dynamic_bitset<> *bondsInPlay,
+                        const std::vector<std::string> *atomSymbols = nullptr,
+                        const std::vector<std::string> *bondSymbols = nullptr) {
   PRECONDITION(params.rootedAtAtom < static_cast<int>(inmol.getNumAtoms()),
                "bad atom index");
   ROMol mol(inmol);
@@ -875,7 +887,8 @@ std::string molToSmarts(const ROMol &inmol, const SmilesWriteParams &params,
     }
 
     subSmi = FragmentSmartsConstruct(mol, nextAtomIdx, colors, ranks, params,
-                                     atomOrdering, bondOrdering, bondsInPlay);
+                                     atomOrdering, bondOrdering, bondsInPlay,
+                                     atomSymbols, bondSymbols);
     res += subSmi;
 
     colorIt = std::find(colors.begin(), colors.end(), Canon::WHITE_NODE);
@@ -1008,15 +1021,29 @@ std::string MolToSmarts(const ROMol &mol, const SmilesWriteParams &ps) {
   }
 
   std::vector<AtomColors> colors(nAtoms, Canon::WHITE_NODE);
-  return molToSmarts(mol, ps, std::move(colors), nullptr);
+  return molToSmarts(mol, ps, std::move(colors), nullptr, nullptr, nullptr);
 }
 
 std::string MolFragmentToSmarts(const ROMol &mol,
                                 const SmilesWriteParams &params,
                                 const std::vector<int> &atomsToUse,
                                 const std::vector<int> *bondsToUse) {
+  return MolFragmentToSmarts(mol, params, atomsToUse, bondsToUse, nullptr,
+                             nullptr);
+}
+
+std::string MolFragmentToSmarts(const ROMol &mol,
+                                const SmilesWriteParams &params,
+                                const std::vector<int> &atomsToUse,
+                                const std::vector<int> *bondsToUse,
+                                const std::vector<std::string> *atomSymbols,
+                                const std::vector<std::string> *bondSymbols) {
   PRECONDITION(!atomsToUse.empty(), "no atoms provided");
   PRECONDITION(!bondsToUse || !bondsToUse->empty(), "no bonds provided");
+  PRECONDITION(!atomSymbols || atomSymbols->size() >= mol.getNumAtoms(),
+               "bad atomSymbols vector");
+  PRECONDITION(!bondSymbols || bondSymbols->size() >= mol.getNumBonds(),
+               "bad bondSymbols vector");
 
   auto nAtoms = mol.getNumAtoms();
   if (!nAtoms) {
@@ -1042,7 +1069,8 @@ std::string MolFragmentToSmarts(const ROMol &mol,
 
   SmilesWriteParams ps(params);
   ps.rootedAtAtom = -1;
-  return molToSmarts(mol, ps, std::move(colors), bondsInPlay.get());
+  return molToSmarts(mol, ps, std::move(colors), bondsInPlay.get(),
+                     atomSymbols, bondSymbols);
 }
 
 std::string MolToCXSmarts(const ROMol &mol, const SmilesWriteParams &params) {
@@ -1062,7 +1090,19 @@ std::string MolFragmentToCXSmarts(const ROMol &mol,
                                   const SmilesWriteParams &params,
                                   const std::vector<int> &atomsToUse,
                                   const std::vector<int> *bondsToUse) {
-  auto res = MolFragmentToSmarts(mol, params, atomsToUse, bondsToUse);
+  auto res =
+      MolFragmentToCXSmarts(mol, params, atomsToUse, bondsToUse, nullptr, nullptr);
+  return res;
+}
+
+std::string MolFragmentToCXSmarts(const ROMol &mol,
+                                  const SmilesWriteParams &params,
+                                  const std::vector<int> &atomsToUse,
+                                  const std::vector<int> *bondsToUse,
+                                  const std::vector<std::string> *atomSymbols,
+                                  const std::vector<std::string> *bondSymbols) {
+  auto res = MolFragmentToSmarts(mol, params, atomsToUse, bondsToUse,
+                                 atomSymbols, bondSymbols);
   if (!res.empty()) {
     auto cxext = SmilesWrite::getCXExtensions(mol);
     if (!cxext.empty()) {

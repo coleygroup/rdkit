@@ -383,6 +383,34 @@ std::string molFragmentToSmarts(const ROMol &mol, python::object atomsToUse,
                                     doIsomericSmarts);
 }
 
+std::string molFragmentToSmartsWithSymbols(
+    const ROMol &mol, python::object atomsToUse, python::object bondsToUse,
+    python::object atomSymbols, python::object bondSymbols,
+    bool doIsomericSmarts = true) {
+  auto atomIndices =
+      pythonObjectToVect(atomsToUse, static_cast<int>(mol.getNumAtoms()));
+  if (!atomIndices) {
+    throw_value_error("atomsToUse argument must be non-empty");
+  }
+  auto bondIndices =
+      pythonObjectToVect(bondsToUse, static_cast<int>(mol.getNumBonds()));
+  std::unique_ptr<std::vector<std::string>> asymbols =
+      pythonObjectToVect<std::string>(atomSymbols);
+  std::unique_ptr<std::vector<std::string>> bsymbols =
+      pythonObjectToVect<std::string>(bondSymbols);
+  if (asymbols.get() && asymbols->size() != mol.getNumAtoms()) {
+    throw_value_error("length of atom symbol list != number of atoms");
+  }
+  if (bsymbols.get() && bsymbols->size() != mol.getNumBonds()) {
+    throw_value_error("length of bond symbol list != number of bonds");
+  }
+
+  SmilesWriteParams ps;
+  ps.doIsomericSmiles = doIsomericSmarts;
+  return RDKit::MolFragmentToSmarts(mol, ps, *atomIndices, bondIndices.get(),
+                                    asymbols.get(), bsymbols.get());
+}
+
 std::string molFragmentToCXSmarts(const ROMol &mol, python::object atomsToUse,
                                   python::object bondsToUse,
                                   bool doIsomericSmarts = true) {
@@ -2120,6 +2148,29 @@ BOOST_PYTHON_MODULE(rdmolfiles) {
       "MolFragmentToSmarts", molFragmentToSmarts,
       (python::arg("mol"), python::arg("atomsToUse"),
        python::arg("bondsToUse") = 0, python::arg("isomericSmarts") = true),
+      docString.c_str());
+
+  docString =
+      "Returns a SMARTS string for a fragment of a molecule\n\
+  ARGUMENTS:\n\
+\n\
+    - mol: the molecule\n\
+    - atomsToUse: indices of atoms to include in the SMARTS string\n\
+    - bondsToUse: (optional) indices of bonds to include in the SMARTS string\n\
+    - atomSymbols: (optional) replacement symbols for atoms (length = num atoms)\n\
+    - bondSymbols: (optional) replacement symbols for bonds (length = num bonds)\n\
+    - isomericSmarts: (optional) include stereochemistry in the SMARTS. Defaults to true.\n\
+\n\
+  RETURNS:\n\
+\n\
+    a string\n\
+\n";
+  python::def(
+      "MolFragmentToSmarts", molFragmentToSmartsWithSymbols,
+      (python::arg("mol"), python::arg("atomsToUse"),
+       python::arg("bondsToUse") = 0, python::arg("atomSymbols") = 0,
+       python::arg("bondSymbols") = 0,
+       python::arg("isomericSmarts") = true),
       docString.c_str());
 
   docString =
