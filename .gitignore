@@ -162,3 +162,8 @@ node_modules
 /compile_commands.json
 /External/ChemDraw/chemdraw
 /External/AvalonTools/ava-formake-AvalonToolkit*
+
+Code/GraphMol/AtomTyper/noncanon_efg_templates_20240108 copy.csv
+Code/GraphMol/AtomTyper/noncanon_efg_templates_20240108.xlsx
+rez.txt
+texput.log
