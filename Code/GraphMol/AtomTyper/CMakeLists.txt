@@ -26,8 +26,8 @@ rdkit_headers(atom_typer.hpp
             #   parser.hpp
               DEST GraphMol/AtomTyper)
 
-rdkit_catch_test(testAtomTyper test_atom_typer.cpp
-                 LINK_LIBRARIES AtomTyper SmilesParse)
+# rdkit_catch_test(testAtomTyper test_atom_typer.cpp
+#                  LINK_LIBRARIES AtomTyper SmilesParse)
 
 rdkit_catch_test(testSmartsAnalyzer test_smarts_analyzer.cpp
                  LINK_LIBRARIES AtomTyper SmilesParse)

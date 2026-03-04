@@ -8,10 +8,22 @@ struct AtomTyperFixture {
     atom_typer::AtomTyper typer;
 };
 
+static std::vector<atom_typer::AtomType> extract_atom_types(
+    const std::vector<atom_typer::PatternItem> &pattern_items) {
+    std::vector<atom_typer::AtomType> atom_types;
+    atom_types.reserve(pattern_items.size());
+    for (const auto &item : pattern_items) {
+        if (item.kind == atom_typer::PatternItemKind::Atom) {
+            atom_types.push_back(item.atom);
+        }
+    }
+    return atom_types;
+}
+
 // Test basic SMILES parsing
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Basic SMILES (ethanol)", "[AtomTyper]") {
     std::string smiles = "CCO";
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 3);
     
@@ -31,7 +43,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Basic SMILES (ethanol)", "[AtomTy
 // Test aromatic molecules
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Aromatic benzene", "[AtomTyper]") {
     std::string smiles = "c1ccccc1";
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 6);
     
@@ -47,7 +59,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Aromatic benzene", "[AtomTyper]")
 // Test ring detection
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Ring detection", "[AtomTyper]") {
     std::string smiles = "C1CCCCC1";  // Cyclohexane
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 6);
     
@@ -61,7 +73,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Ring detection", "[AtomTyper]") {
 // Test hybridization
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Hybridization (SP2)", "[AtomTyper]") {
     std::string smiles = "C=C";  // Ethene (SP2)
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 2);
     
@@ -73,7 +85,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Hybridization (SP2)", "[AtomTyper
 // Test triple bond (SP hybridization)
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Hybridization (SP)", "[AtomTyper]") {
     std::string smiles = "C#C";  // Ethyne (SP)
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 2);
     
@@ -85,7 +97,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Hybridization (SP)", "[AtomTyper]
 // Test formal charges
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Formal charge", "[AtomTyper]") {
     std::string smiles = "[NH4+]";  // Ammonium ion
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 1);
     CHECK(atom_types[0].atomic_number == 7);
@@ -326,7 +338,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS bond counts and hybridizat
 
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: remaining valence uses RDKit valence API", "[AtomTyper]") {
     std::string smiles = "CCO";
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 3);
     CHECK(atom_types[0].remaining_valence == 3);
@@ -349,7 +361,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Empty SMILES throws", "[AtomTyper
 // Test neighbor detection
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Neighbor detection", "[AtomTyper]") {
     std::string smiles = "CCC";  // Propane
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 3);
     
@@ -366,7 +378,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Neighbor detection", "[AtomTyper]
 // Test SMARTS pattern generation
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS pattern generation", "[AtomTyper]") {
     std::string smiles = "CCO";
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 3);
     
@@ -381,7 +393,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS pattern generation", "[Ato
 // Test get_atom_types_string
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: get_atom_types_string", "[AtomTyper]") {
     std::string smiles = "CC";
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     std::string output = typer.get_atom_types_string(atom_types);
     
     CHECK_FALSE(output.empty());
@@ -402,7 +414,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: canonical setting", "[AtomTyper]"
 // Test ring membership list
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: ring membership list", "[AtomTyper]") {
     std::string smiles = "C1CCCCC1";  // Cyclohexane
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 6);
     
@@ -414,7 +426,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: ring membership list", "[AtomType
 // Test number of ring bonds
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of ring bonds", "[AtomTyper]") {
     std::string smiles = "C1CCCCC1";  // Cyclohexane    
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 6);
     
@@ -426,7 +438,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of ring bonds", "[AtomType
 // Test number of aliphatic rings
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aliphatic rings (cyclohexane)", "[AtomTyper]") {
     std::string smiles = "C1CCCCC1";  // Cyclohexane
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 6);
 
@@ -438,7 +450,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aliphatic rings (cycloh
 // Test number of aliphatic rings
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aliphatic rings (benzene)", "[AtomTyper]") {
     std::string smiles = "c1ccccc1";  // Benzene
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     
     REQUIRE(atom_types.size() == 6);
 
@@ -450,7 +462,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aliphatic rings (benzen
 // Test number of aromatic rings
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aromatic rings (benzene)", "[AtomTyper]") {
     std::string smiles = "c1ccccc1";  // Benzene
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 6);
 
@@ -462,7 +474,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aromatic rings (benzene
 // Test number of aromatic rings
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aromatic rings (cyclohexane)", "[AtomTyper]") {
     std::string smiles = "C1CCCCC1";  // Cyclohexane
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 6);
 
@@ -474,7 +486,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aromatic rings (cyclohe
 // Test ring connectivity
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: ring connectivity", "[AtomTyper]") {
     std::string smiles = "C1CCCCC1";  // Cyclohexane
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 6);
 
@@ -487,7 +499,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: ring connectivity", "[AtomTyper]"
 // Test bond types map
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: bond types map", "[AtomTyper]") {
     std::string smiles = "CC=O";  // Acetaldehyde
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 3);
 
@@ -500,7 +512,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: bond types map", "[AtomTyper]") {
 // Test chirality
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: chirality", "[AtomTyper]") {
     std::string smiles = "CC[C@H](O)C";  // (R)-2-butanol - true chiral center
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
     REQUIRE(atom_types.size() == 5);
 
@@ -512,7 +524,7 @@ TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: chirality", "[AtomTyper]") {
 // Test atom type string
 TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: atom type string content", "[AtomTyper]") {
     std::string smiles = "CCO";
-    auto atom_types = typer.type_atoms_from_smiles(smiles);
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
     std::string output = typer.get_atom_types_string(atom_types);
     
     // Check for specific content
