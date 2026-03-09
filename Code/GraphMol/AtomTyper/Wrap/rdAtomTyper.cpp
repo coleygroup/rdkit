@@ -453,6 +453,32 @@ python::dict querymolFromSmarts(const std::string &smarts) {
   return result;
 }
 
+std::string smilesToSmartsByLevel(const std::string &smiles,
+                                  atom_typer::Level level) {
+  return atom_typer::smiles_to_smarts(smiles, level);
+}
+
+std::string smilesToSmartsByPrimitives(const std::string &smiles,
+                                       const python::object &primitives) {
+  std::vector<std::string> primitive_list;
+  if (PyUnicode_Check(primitives.ptr())) {
+    primitive_list.push_back(python::extract<std::string>(primitives));
+  } else {
+    python::stl_input_iterator<std::string> begin(primitives), end;
+    for (auto it = begin; it != end; ++it) {
+      primitive_list.push_back(*it);
+    }
+  }
+
+  if (primitive_list.empty()) {
+    PyErr_SetString(PyExc_ValueError,
+                    "primitives must be a non-empty string or iterable of strings");
+    python::throw_error_already_set();
+  }
+
+  return atom_typer::smiles_to_smarts(smiles, primitive_list);
+}
+
 }  // namespace
 
 BOOST_PYTHON_MODULE(rdAtomTyper) {
@@ -562,8 +588,14 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
       .def("enumerate_variants", &enumerateVariants,
            (python::arg("smarts"), python::arg("max")));
 
-  python::def("smiles_to_smarts", &atom_typer::smiles_to_smarts,
-              (python::arg("smiles"), python::arg("level")));
+  python::def("smiles_to_smarts", &smilesToSmartsByLevel,
+              (python::arg("smiles"), python::arg("level")),
+              "Convert SMILES to SMARTS using a predefined detail Level.");
+
+  python::def("smiles_to_smarts", &smilesToSmartsByPrimitives,
+              (python::arg("smiles"), python::arg("primitives")),
+              "Convert SMILES to SMARTS using custom primitives, e.g. "
+              "['X','D','R'] or '[charge, R, D]'.");
 
   python::scope().attr("LOG_ALL") = atom_typer::SmartsAnalyzer::LogAll;
 

@@ -6,6 +6,7 @@
 #include <GraphMol/GraphMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <GraphMol/QueryAtom.h>
+#include <GraphMol/Substruct/SubstructMatch.h>
 
 TEST_CASE("ExpressionBuilder: SmilesToSmarts minimal", "[ExpressionBuilder]") {
     std::string smarts = atom_typer::smiles_to_smarts("CCO", atom_typer::Level::MINIMAL);
@@ -200,4 +201,61 @@ TEST_CASE("ExpressionBuilder: queryMoleculeToSmarts simple carbon", "[Expression
     std::string smartsDetailed = atom_typer::queryMoleculeToSmarts(mol.get(), queryMol.get(), 
                                                                     atom_typer::Level::DETAILED);
     CHECK(smartsDetailed == "[C;D0;H4]");
+}
+
+TEST_CASE("ExpressionBuilder: primitive list supports bracket syntax", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"[atomic_number,D,R]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+}
+
+TEST_CASE("ExpressionBuilder: primitive list without element", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("C1CC1", {"[R,D]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("C1CC1"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+}
+
+TEST_CASE("ExpressionBuilder: primitive list with charge", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("[NH4+]", {"[charge, R, D]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("[NH4+]"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+}
+
+TEST_CASE("ExpressionBuilder: primitive list includes total degree and ring bond count", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("C1CC1", {"[X,x]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("C1CC1"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+}
+
+TEST_CASE("ExpressionBuilder: primitive list rejects unknown primitive", "[ExpressionBuilder]") {
+    CHECK_THROWS_AS(atom_typer::smiles_to_smarts("CCO", {"[X,not_a_primitive]"}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("ExpressionBuilder: atomic number is always first when present", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"[D,R,atomic_number]"});
+    CHECK(smarts.find("[#6") != std::string::npos);
+    CHECK(smarts.find("-") != std::string::npos);
+}
+
+TEST_CASE("ExpressionBuilder: element symbol is moved ahead of other primitives", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"[D,R,element]"});
+    CHECK(smarts.find("[C") != std::string::npos);
+    CHECK(smarts.find("-") != std::string::npos);
 }

@@ -7,8 +7,183 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <vector>
+#include <cctype>
+#include <algorithm>
 
 namespace atom_typer {
+
+std::string getElementSymbol(int atomicNum);
+
+namespace {
+
+std::string trim(const std::string &input) {
+    size_t first = 0;
+    while (first < input.size() &&
+           std::isspace(static_cast<unsigned char>(input[first]))) {
+        ++first;
+    }
+    size_t last = input.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(input[last - 1]))) {
+        --last;
+    }
+    return input.substr(first, last - first);
+}
+
+std::string toLowerCopy(std::string value) {
+    for (auto &ch : value) {
+        ch = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+std::vector<std::string> normalizePrimitiveList(
+    const std::vector<std::string> &primitiveList) {
+    std::vector<std::string> tokens;
+    for (const auto &entry : primitiveList) {
+        std::string work = trim(entry);
+        if (work.empty()) {
+            continue;
+        }
+        if (!work.empty() && work.front() == '[') {
+            work.erase(work.begin());
+        }
+        if (!work.empty() && work.back() == ']') {
+            work.pop_back();
+        }
+
+        size_t start = 0;
+        while (start < work.size()) {
+            const size_t comma = work.find(',', start);
+            const size_t end = (comma == std::string::npos) ? work.size() : comma;
+            std::string token = trim(work.substr(start, end - start));
+            if (!token.empty()) {
+                tokens.push_back(token);
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+    }
+    auto primitiveOrderPriority = [](const std::string &token) {
+        const std::string lower = toLowerCopy(token);
+        if (lower == "atomic_number" || lower == "atomicnum" ||
+            lower == "atomatomicnum") {
+            return 0;
+        }
+        if (lower == "element" || lower == "atom" || lower == "symbol") {
+            return 1;
+        }
+        return 2;
+    };
+
+    // Keep user order for most primitives, but force atomic identity keys first.
+    std::stable_sort(tokens.begin(), tokens.end(),
+                     [&](const std::string &lhs, const std::string &rhs) {
+                         return primitiveOrderPriority(lhs) <
+                                primitiveOrderPriority(rhs);
+                     });
+
+    return tokens;
+}
+
+std::vector<std::string> primitivesForLevel(Level level) {
+    if (level == Level::MINIMAL) {
+        return {"element"};
+    }
+    if (level == Level::STANDARD) {
+        return {"element", "D"};
+    }
+    if (level == Level::DETAILED) {
+        return {"element", "D", "H"};
+    }
+    return {"element", "a", "D", "H", "charge", "v", "R", "r", "X", "x"};
+}
+
+std::string primitiveValue(const RDKit::Atom *atom,
+                           const RDKit::ROMol *mol,
+                           const std::string &primitive) {
+    const std::string primitiveLower = toLowerCopy(primitive);
+    if (primitiveLower == "element" || primitiveLower == "atom" ||
+        primitiveLower == "symbol") {
+        return getElementSymbol(atom->getAtomicNum());
+    }
+    if (primitive == "D" || primitiveLower == "degree" ||
+        primitiveLower == "atomexplicitdegree") {
+        return "D" + std::to_string(atom->getDegree());
+    }
+    if (primitive == "H" || primitiveLower == "hcount" ||
+        primitiveLower == "atomhcount") {
+        return "H" + std::to_string(atom->getTotalNumHs(true));
+    }
+    if (primitive == "h" || primitiveLower == "atomimplicithcount") {
+        return "h" + std::to_string(atom->getNumImplicitHs());
+    }
+    if (primitiveLower == "charge" || primitiveLower == "formalcharge" ||
+        primitiveLower == "atomformalcharge") {
+        const int charge = atom->getFormalCharge();
+        return (charge >= 0 ? "+" : "") + std::to_string(charge);
+    }
+    if (primitive == "v" || primitiveLower == "valence" ||
+        primitiveLower == "atomtotalvalence") {
+        return "v" + std::to_string(atom->getTotalValence());
+    }
+    if (primitive == "R" || primitiveLower == "ring" ||
+        primitiveLower == "atominnrings" ||
+        primitiveLower == "atomringcount" ||
+        primitiveLower == "atom_ring_count") {
+        return "R" + std::to_string(mol->getRingInfo()->numAtomRings(atom->getIdx()));
+    }
+    if (primitive == "r" || primitiveLower == "atomminringsize") {
+        return "r" + std::to_string(mol->getRingInfo()->minAtomRingSize(atom->getIdx()));
+    }
+    if (primitive == "a" || primitiveLower == "aromatic" ||
+        primitiveLower == "atomisaromatic") {
+        return atom->getIsAromatic() ? "a" : "!a";
+    }
+    if (primitive == "A" || primitiveLower == "aliphatic" ||
+        primitiveLower == "atomisaliphatic") {
+        return atom->getIsAromatic() ? "!A" : "A";
+    }
+    if (primitive == "X" || primitiveLower == "atomtotaldegree") {
+        return "X" + std::to_string(atom->getTotalDegree());
+    }
+    if (primitive == "x" || primitiveLower == "atomringbondcount") {
+        int ringBondCount = 0;
+        for (const auto bond : mol->atomBonds(atom)) {
+            if (mol->getRingInfo()->numBondRings(bond->getIdx()) > 0) {
+                ++ringBondCount;
+            }
+        }
+        return "x" + std::to_string(ringBondCount);
+    }
+    if (primitiveLower == "atomic_number" || primitiveLower == "atomicnum" ||
+        primitiveLower == "atomatomicnum") {
+        return "#" + std::to_string(atom->getAtomicNum());
+    }
+
+    throw std::invalid_argument("Unsupported primitive: " + primitive);
+}
+
+std::string buildAtomPrimitiveToken(const RDKit::Atom *atom,
+                                    const RDKit::ROMol *mol,
+                                    const std::vector<std::string> &tokens) {
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0) {
+            ss << ";";
+        }
+        ss << primitiveValue(atom, mol, tokens[i]);
+    }
+    ss << "]";
+    return ss.str();
+}
+
+}  // namespace
 
 // Helper function to get element symbol from atomic number
 std::string getElementSymbol(int atomicNum) {
@@ -68,215 +243,88 @@ std::string queryMoleculeToSmarts(const RDKit::ROMol* mol,
  * @return SMARTS string representation
  */
 std::string smiles_to_smarts(const std::string& smiles, Level level) {
-    /*
-    Parse SMILES string to RDKit molecule
-    Based on level, add appropriate query features:
-        - MINIMAL: Just element types
-        - STANDARD: Elements + bond types + aromaticity
-        - DETAILED: Add hydrogen counts, charges
-        - COMPLETE: Add all features (valence, connectivity, ring membership)
-    Convert to SMARTS string
-    */ 
-
-    // For an empty SMILES string, throw an exception
     if (smiles.empty()) {
         throw std::invalid_argument("Input SMILES string is empty");
     }
 
-    // Parse SMILES to RDKit molecule
     std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles));
-
-    // if not valid molecule, throw an exception
     if (!mol) {
         throw std::invalid_argument("Invalid SMILES string");
     }
 
-    // Create a new RWMol (editable molecule) to build our query molecule -> SMARTS
-    std::unique_ptr<RDKit::RWMol> queryMol(new RDKit::RWMol());
-
-    // For MINIMAL level, smiles "CCO" -> "[C][C][O]" 
-    // Each element is represented only by its atomic symbol
+    std::stringstream ss;
     if (level == Level::MINIMAL) {
-        /*
-        SMARTS string in the form of only atomic symbols
+        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
+            const auto atom = mol->getAtomWithIdx(i);
+            ss << "[" << getElementSymbol(atom->getAtomicNum()) << "]";
+        }
+        return ss.str();
+    }
+    if (level == Level::STANDARD) {
+        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
+            const auto atom = mol->getAtomWithIdx(i);
+            ss << "[" << getElementSymbol(atom->getAtomicNum())
+               << ";D" << atom->getDegree() << "]";
+        }
+        return ss.str();
+    }
+    if (level == Level::DETAILED) {
+        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
+            const auto atom = mol->getAtomWithIdx(i);
+            ss << "[" << getElementSymbol(atom->getAtomicNum())
+               << ";D" << atom->getDegree()
+               << ";H" << atom->getTotalNumHs(true) << "]";
+        }
+        return ss.str();
+    }
 
-        Create new molecule with only atomic numbers preserved
-        Use QueryAtom objects for atoms
-        Include bonds with UNSPECIFIED type
-        */
+    return smiles_to_smarts(smiles, primitivesForLevel(level));
+}
 
-        for (const auto atom : mol->atoms()) {
+std::string smiles_to_smarts(const std::string &smiles,
+                             const std::vector<std::string> &primitiveList) {
+    if (smiles.empty()) {
+        throw std::invalid_argument("Input SMILES string is empty");
+    }
 
-            // Get the atomic number and add to query molecule
-            int atomicNum = atom->getAtomicNum();
-            RDKit::QueryAtom* queryAtom = new RDKit::QueryAtom(atom->getAtomicNum());
-            queryMol->addAtom(queryAtom, false, true);
+    std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles));
+    if (!mol) {
+        throw std::invalid_argument("Invalid SMILES string");
+    }
+
+    const std::vector<std::string> tokens = normalizePrimitiveList(primitiveList);
+    if (tokens.empty()) {
+        throw std::invalid_argument("Primitive list is empty");
+    }
+
+    RDKit::RWMol queryMol;
+    for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
+        const auto atom = mol->getAtomWithIdx(i);
+        const std::string atomToken = buildAtomPrimitiveToken(atom, mol.get(), tokens);
+
+        std::unique_ptr<RDKit::ROMol> atomQueryMol(RDKit::SmartsToMol(atomToken));
+        if (!atomQueryMol || atomQueryMol->getNumAtoms() != 1) {
+            throw std::invalid_argument("Failed to build atom query from primitives: " +
+                                        atomToken);
         }
 
-        // Add bonds and connectivity, but no specific bond types
-        for (auto bond : mol->bonds()) {
-            queryMol->addBond(bond->getBeginAtomIdx(), bond->getEndAtomIdx(), 
-            RDKit::Bond::UNSPECIFIED);
+        const RDKit::Atom *parsedAtom = atomQueryMol->getAtomWithIdx(0);
+        auto *queryAtom = new RDKit::QueryAtom(parsedAtom->getAtomicNum());
+        if (parsedAtom->hasQuery()) {
+            queryAtom->setQuery(parsedAtom->getQuery()->copy());
+        }
+        queryMol.addAtom(queryAtom, false, true);
+    }
+
+    for (const auto bond : mol->bonds()) {
+        queryMol.addBond(bond->getBeginAtomIdx(), bond->getEndAtomIdx(),
+                         bond->getBondType());
+        if (bond->getIsAromatic()) {
+            queryMol.getBondWithIdx(queryMol.getNumBonds() - 1)->setIsAromatic(true);
         }
     }
 
-    else if (level == Level::STANDARD) {
-        /*
-        SMARTS string with elements, aromaticity, and bond types
-
-        Creates new molecule, get atomic number
-        Get aromaticity from original molecule
-        Add bond types (single, double, aromatic, etc.)
-        */
-        for (const auto atom : mol->atoms()) {
-
-            // Get the atomic number and add to query molecule
-            int atomicNum = atom->getAtomicNum();
-            RDKit::QueryAtom* queryAtom = new RDKit::QueryAtom(atom->getAtomicNum());
-
-            //Check if it is aromatic
-            if (atom->getIsAromatic()) {
-                queryAtom->setIsAromatic(true);
-            }
-
-            queryMol->addAtom(queryAtom, false, true);
-        }
-
-        for (auto bond : mol->bonds()) {
-
-            // Get bond type and add to query molecule
-            RDKit::Bond::BondType bondType = bond->getBondType();
-            queryMol->addBond(bond->getBeginAtomIdx(), bond->getEndAtomIdx(), bondType);
-
-            // Check bond aromaticity
-            if (bond->getIsAromatic()) {
-                queryMol->getBondWithIdx(queryMol->getNumBonds() - 1)->setIsAromatic(true);
-            }
-        }
-    }
-
-    else if (level == Level::DETAILED) {
-        /*
-        Create SMARTS string with elements, aromaticity, bond types,
-        explicit hydrogen counts, and formal charges
-
-        Add specific bond types as in STANDARD level
-        */
-
-        for (const auto atom :  mol->atoms()) {
-
-            // Get the atomic number and add to query molecule
-            int atomicNum = atom->getAtomicNum();
-            RDKit::QueryAtom* queryAtom = new RDKit::QueryAtom(atom->getAtomicNum());
-
-            // Check for aromaticity
-            if (atom->getIsAromatic()) {
-                queryAtom->setIsAromatic(true);
-            }
-
-            // Add explicit hydrogen count query
-            int explicitHCount = atom->getTotalNumHs(true);
-
-            queryAtom->expandQuery(
-                RDKit::makeAtomHCountQuery(explicitHCount),
-                Queries::COMPOSITE_AND);
-
-            // Add formal charge
-            int formalCharge = atom->getFormalCharge();
-            // Check for formal charge
-            if (formalCharge != 0) {
-                queryAtom->expandQuery(
-                    RDKit::makeAtomFormalChargeQuery(formalCharge),
-                    Queries::COMPOSITE_AND);
-            }
-            // Get the atomic number and add to query molecule
-            queryMol->addAtom(queryAtom, false, true);
-        }
-
-        for (auto bond : mol->bonds()) {
-
-            // Get bond type and add to query molecule same as STANDARD level
-            RDKit::Bond::BondType bondType = bond->getBondType();
-            queryMol->addBond(bond->getBeginAtomIdx(), bond->getEndAtomIdx(), bondType);
-            if (bond->getIsAromatic()) {
-                queryMol->getBondWithIdx(queryMol->getNumBonds() - 1)->setIsAromatic(true);
-            }
-        }
-    }
-
-    else if (level == Level::COMPLETE) {
-        /*
-        Create SMARTS string with atomic number, aromaticity, bond types,
-        explicit hydrogen counts, formal charges, valence, connectivity,
-        ring membership, hybridization
-
-        Add bonds with specific types like STANDARD and DETAILED levels
-        */
-
-        for (const auto atom : mol->atoms()) {
-
-            // Get the atomic number and add to query molecule
-            int atomicNum = atom->getAtomicNum();
-            RDKit::QueryAtom* queryAtom = new RDKit::QueryAtom(atom->getAtomicNum());
-
-            // Check for aromaticity
-            if (atom->getIsAromatic()) {
-                queryAtom->setIsAromatic(true);
-            }
-
-            // Add explicit hydrogen count query
-            int explicitHCount = atom->getTotalNumHs(true);
-            queryAtom->expandQuery(
-                RDKit::makeAtomHCountQuery(explicitHCount),
-                Queries::COMPOSITE_AND);
-
-            // Add formal charge
-            int formalCharge = atom->getFormalCharge();
-            if (formalCharge != 0) {
-                queryAtom->expandQuery(
-                    RDKit::makeAtomFormalChargeQuery(formalCharge),
-                    Queries::COMPOSITE_AND);
-            }
-
-            // Add total valence query
-            int totalValence = atom->getTotalValence();
-            queryAtom->expandQuery(
-                RDKit::makeAtomTotalValenceQuery(totalValence),
-                Queries::COMPOSITE_AND);
-
-            // Add ring membership query
-            RDKit::RingInfo* ringInfo = mol->getRingInfo();
-            bool isInRing = ringInfo->numAtomRings(atom->getIdx()) > 0;
-            queryAtom->expandQuery(
-                RDKit::makeAtomInRingQuery(),
-                Queries::COMPOSITE_AND,
-                !isInRing);
-
-            // Add hybridization query
-            RDKit::Atom::HybridizationType hybridization = atom->getHybridization();
-            if (hybridization != RDKit::Atom::UNSPECIFIED) {
-                queryAtom->expandQuery(
-                RDKit::makeAtomHybridizationQuery(hybridization),
-                Queries::COMPOSITE_AND);
-            }
-            
-            // Get the atomic number and add to query molecule
-            queryMol->addAtom(queryAtom, false, true);
-        }
-
-        for (auto bond : mol->bonds()) {
-
-            // Get bond type and add to query molecule same as STANDARD and DETAILED levels
-            RDKit::Bond::BondType bondType = bond->getBondType();
-            queryMol->addBond(bond->getBeginAtomIdx(), bond->getEndAtomIdx(), bondType);
-            if (bond->getIsAromatic()) {
-                queryMol->getBondWithIdx(queryMol->getNumBonds() - 1)->setIsAromatic(true);
-            }
-        }
-    }
-
-    // Convert query molecule to SMARTS string
-    return queryMoleculeToSmarts(mol.get(), queryMol.get(), level);
+    return RDKit::MolToSmarts(queryMol);
 }
 
 } // namespace atom_typer
