@@ -67,8 +67,32 @@ PYBIND11_MODULE(atom_typer, m) {
         .value("COMPLETE", atom_typer::Level::COMPLETE, "All features: valence, connectivity, ring membership")
         .export_values();
     
-    // Bind smiles_to_smarts function
-    m.def("smiles_to_smarts", &atom_typer::smiles_to_smarts,
-          py::arg("smiles"), py::arg("level"),
-          "Convert a SMILES string to a SMARTS pattern with specified detail level");
+    // Bind smiles_to_smarts overloads (single and batch)
+    m.def("smiles_to_smarts",
+         static_cast<std::string (*)(const std::string &, atom_typer::Level)>(
+            &atom_typer::smiles_to_smarts),
+         py::arg("smiles"), py::arg("level"),
+         "Convert a SMILES string to a SMARTS pattern with specified detail level");
+
+    m.def("smiles_to_smarts",
+         static_cast<std::string (*)(const std::string &,
+                                const std::vector<std::string> &)>(
+            &atom_typer::smiles_to_smarts),
+         py::arg("smiles"), py::arg("primitives"),
+         "Convert a SMILES string to a SMARTS pattern with a custom primitive list");
+
+    m.def("smiles_to_smarts",
+         static_cast<std::vector<std::string> (*)(
+            const std::vector<std::string> &, atom_typer::Level)>(
+            &atom_typer::smiles_to_smarts),
+         py::arg("smiles_list"), py::arg("level"),
+         "Batch convert SMILES strings to SMARTS patterns with specified detail level");
+
+    m.def("smiles_to_smarts",
+         static_cast<std::vector<std::string> (*)(
+            const std::vector<std::string> &,
+            const std::vector<std::string> &)>(
+            &atom_typer::smiles_to_smarts),
+         py::arg("smiles_list"), py::arg("primitives"),
+         "Batch convert SMILES strings to SMARTS patterns with a shared primitive list");
 }

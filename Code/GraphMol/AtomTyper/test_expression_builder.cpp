@@ -259,3 +259,38 @@ TEST_CASE("ExpressionBuilder: element symbol is moved ahead of other primitives"
     CHECK(smarts.find("[C") != std::string::npos);
     CHECK(smarts.find("-") != std::string::npos);
 }
+
+TEST_CASE("ExpressionBuilder: batch smiles_to_smarts by level", "[ExpressionBuilder]") {
+    const std::vector<std::string> smarts =
+        atom_typer::smiles_to_smarts(std::vector<std::string>{"CCO", "C"},
+                                     atom_typer::Level::STANDARD);
+    REQUIRE(smarts.size() == 2);
+    CHECK(smarts[0] == "[C;D1][C;D2][O;D1]");
+    CHECK(smarts[1] == "[C;D0]");
+}
+
+TEST_CASE("ExpressionBuilder: batch smiles_to_smarts by primitive list", "[ExpressionBuilder]") {
+    const std::vector<std::string> smarts = atom_typer::smiles_to_smarts(
+        std::vector<std::string>{"CCO", "C1CC1"}, {"[atomic_number,D]"});
+    REQUIRE(smarts.size() == 2);
+
+    std::unique_ptr<RDKit::ROMol> query1(RDKit::SmartsToMol(smarts[0]));
+    std::unique_ptr<RDKit::ROMol> target1(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query1 != nullptr);
+    REQUIRE(target1 != nullptr);
+    CHECK(query1->getNumBonds() == target1->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target1, *query1).size() > 0);
+
+    std::unique_ptr<RDKit::ROMol> query2(RDKit::SmartsToMol(smarts[1]));
+    std::unique_ptr<RDKit::ROMol> target2(RDKit::SmilesToMol("C1CC1"));
+    REQUIRE(query2 != nullptr);
+    REQUIRE(target2 != nullptr);
+    CHECK(query2->getNumBonds() == target2->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target2, *query2).size() > 0);
+}
+
+TEST_CASE("ExpressionBuilder: batch smiles_to_smarts handles empty list", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_smarts(std::vector<std::string>{},
+                                                     atom_typer::Level::MINIMAL);
+    CHECK(smarts.empty());
+}

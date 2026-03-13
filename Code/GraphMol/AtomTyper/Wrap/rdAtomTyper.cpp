@@ -8,6 +8,8 @@
 #include <GraphMol/AtomTyper/atom_typer.hpp>
 #include <GraphMol/AtomTyper/smarts_analyzer.hpp>
 #include <GraphMol/AtomTyper/expression_builder.hpp>
+#include <GraphMol/AtomTyper/reaction_extractor.hpp>
+#include <GraphMol/ChemReactions/Reaction.h>
 #include <GraphMol/GraphMol.h>
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/QueryBond.h>
@@ -134,6 +136,15 @@ python::list vectorStringToList(const std::vector<std::string> &vals) {
   python::list res;
   for (const auto &v : vals) {
     res.append(v);
+  }
+  return res;
+}
+
+python::list vectorVectorStringToList(
+    const std::vector<std::vector<std::string>> &vals) {
+  python::list res;
+  for (const auto &inner : vals) {
+    res.append(vectorStringToList(inner));
   }
   return res;
 }
@@ -453,13 +464,41 @@ python::dict querymolFromSmarts(const std::string &smarts) {
   return result;
 }
 
-std::string smilesToSmartsByLevel(const std::string &smiles,
-                                  atom_typer::Level level) {
-  return atom_typer::smiles_to_smarts(smiles, level);
+std::vector<std::string> smilesInputToVector(const python::object &smiles_or_list,
+                                             bool *was_single = nullptr) {
+  std::vector<std::string> smiles_list;
+  const bool single = PyUnicode_Check(smiles_or_list.ptr());
+  if (was_single) {
+    *was_single = single;
+  }
+
+  if (single) {
+    smiles_list.push_back(python::extract<std::string>(smiles_or_list));
+    return smiles_list;
+  }
+
+  python::stl_input_iterator<std::string> begin(smiles_or_list), end;
+  for (auto it = begin; it != end; ++it) {
+    smiles_list.push_back(*it);
+  }
+  return smiles_list;
 }
 
-std::string smilesToSmartsByPrimitives(const std::string &smiles,
-                                       const python::object &primitives) {
+python::object smilesToSmartsByLevel(const python::object &smiles_or_list,
+                                     atom_typer::Level level) {
+  bool was_single = false;
+  const auto smiles_list = smilesInputToVector(smiles_or_list, &was_single);
+  const auto out = atom_typer::smiles_to_smarts(smiles_list, level);
+  if (was_single) {
+    return python::object(out.front());
+  }
+  return vectorStringToList(out);
+}
+
+std::vector<std::string> primitivesToVector(const python::object &primitives);
+
+python::object smilesToSmartsByPrimitives(const python::object &smiles_or_list,
+                                          const python::object &primitives) {
   std::vector<std::string> primitive_list;
   if (PyUnicode_Check(primitives.ptr())) {
     primitive_list.push_back(python::extract<std::string>(primitives));
@@ -476,7 +515,78 @@ std::string smilesToSmartsByPrimitives(const std::string &smiles,
     python::throw_error_already_set();
   }
 
-  return atom_typer::smiles_to_smarts(smiles, primitive_list);
+  bool was_single = false;
+  const auto smiles_list = smilesInputToVector(smiles_or_list, &was_single);
+  const auto out = atom_typer::smiles_to_smarts(smiles_list, primitive_list);
+  if (was_single) {
+    return python::object(out.front());
+  }
+  return vectorStringToList(out);
+}
+
+python::object smilesToAtomCenteredSmartsByPrimitives(
+    const python::object &smiles_or_list, const python::object &primitives,
+    unsigned int radius = 0) {
+  const auto primitive_list = primitivesToVector(primitives);
+
+  bool was_single = false;
+  const auto smiles_list = smilesInputToVector(smiles_or_list, &was_single);
+  const auto out = atom_typer::smiles_to_atom_centered_smarts(
+      smiles_list, primitive_list, radius);
+
+  if (was_single) {
+    if (out.empty()) {
+      return python::list();
+    }
+    return vectorStringToList(out.front());
+  }
+  return vectorVectorStringToList(out);
+}
+
+std::vector<std::string> primitivesToVector(const python::object &primitives) {
+  std::vector<std::string> primitive_list;
+  if (PyUnicode_Check(primitives.ptr())) {
+    primitive_list.push_back(python::extract<std::string>(primitives));
+  } else {
+    python::stl_input_iterator<std::string> begin(primitives), end;
+    for (auto it = begin; it != end; ++it) {
+      primitive_list.push_back(*it);
+    }
+  }
+  if (primitive_list.empty()) {
+    PyErr_SetString(PyExc_ValueError,
+                    "primitives must be a non-empty string or iterable of strings");
+    python::throw_error_already_set();
+  }
+  return primitive_list;
+}
+
+python::list radiusTemplatesToPy(
+    const std::vector<atom_typer::RadiusTemplate> &results) {
+  python::list out;
+  for (const auto &entry : results) {
+    out.append(python::make_tuple(std::get<0>(entry), std::get<1>(entry)));
+  }
+  return out;
+}
+
+python::list extractSingleRootTemplateFromReaction(
+    RDKit::ChemicalReaction &rxn, const python::object &primitives,
+    unsigned int max_radius = 3, bool verbose = false) {
+  const auto primitive_list = primitivesToVector(primitives);
+  const auto results = atom_typer::extract_single_root_template(
+      &rxn, primitive_list, max_radius, verbose);
+  return radiusTemplatesToPy(results);
+}
+
+python::list extractSingleRootTemplateFromText(
+    const std::string &reaction_text, const python::object &primitives,
+    unsigned int max_radius = 3, bool verbose = false,
+    bool use_smiles = true) {
+  const auto primitive_list = primitivesToVector(primitives);
+  const auto results = atom_typer::extract_single_root_template(
+      reaction_text, primitive_list, max_radius, verbose, use_smiles);
+  return radiusTemplatesToPy(results);
 }
 
 }  // namespace
@@ -596,6 +706,25 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
               (python::arg("smiles"), python::arg("primitives")),
               "Convert SMILES to SMARTS using custom primitives, e.g. "
               "['X','D','R'] or '[charge, R, D]'.");
+
+  python::def("smiles_to_atom_centered_smarts",
+              &smilesToAtomCenteredSmartsByPrimitives,
+              (python::arg("smiles"), python::arg("primitives"),
+               python::arg("radius") = 0),
+              "Generate per-atom SMARTS neighborhoods rooted at each atom. "
+              "Accepts a SMILES string or iterable of SMILES strings. "
+              "Returns one SMARTS fragment per atom for each input molecule.");
+
+  python::def("extract_single_root_template", &extractSingleRootTemplateFromReaction,
+              (python::arg("reaction"), python::arg("primitives"),
+               python::arg("max_radius") = 3, python::arg("verbose") = false),
+              "Extract radius-indexed reaction core templates from a ChemicalReaction.");
+
+  python::def("extract_single_root_template", &extractSingleRootTemplateFromText,
+              (python::arg("reaction_text"), python::arg("primitives"),
+               python::arg("max_radius") = 3, python::arg("verbose") = false,
+               python::arg("use_smiles") = true),
+              "Extract radius-indexed reaction core templates from reaction text.");
 
   python::scope().attr("LOG_ALL") = atom_typer::SmartsAnalyzer::LogAll;
 

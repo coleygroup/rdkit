@@ -7,6 +7,7 @@
 
 // Forward declarations
 namespace RDKit {
+    class Atom;
     class ROMol;
     class RWMol;
 }
@@ -31,6 +32,16 @@ enum Level {
  * @return SMARTS string with query features based on the specified level
  */
 RDKIT_ATOMTYPER_EXPORT std::string smiles_to_smarts(const std::string& smiles, Level level);
+
+/**
+ * Batch convert SMILES strings to SMARTS patterns using a predefined detail level.
+ *
+ * @param smilesList Input SMILES strings
+ * @param level Detail level for generated SMARTS patterns
+ * @return SMARTS strings in the same order as smilesList
+ */
+RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_smarts(
+    const std::vector<std::string>& smilesList, Level level);
 
 /**
  * Convert a SMILES string to a SMARTS pattern using a custom primitive list.
@@ -58,6 +69,68 @@ RDKIT_ATOMTYPER_EXPORT std::string smiles_to_smarts(const std::string& smiles, L
  */
 RDKIT_ATOMTYPER_EXPORT std::string smiles_to_smarts(
     const std::string& smiles, const std::vector<std::string>& primitiveList);
+
+/**
+ * Batch convert SMILES strings to SMARTS patterns using a shared primitive list.
+ *
+ * @param smilesList Input SMILES strings
+ * @param primitiveList Primitive list using same API as smiles_to_smarts()
+ * @return SMARTS strings in the same order as smilesList
+ */
+RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_smarts(
+    const std::vector<std::string>& smilesList,
+    const std::vector<std::string>& primitiveList);
+
+/**
+ * Generate per-atom SMARTS neighborhoods from a SMILES string.
+ *
+ * For each atom in the molecule, returns a SMARTS fragment rooted at that atom
+ * and including all atoms/bonds within the specified graph radius.
+ * Atom typing is controlled by primitiveList (same API as smiles_to_smarts()).
+ *
+ * @param smiles Input SMILES string
+ * @param primitiveList Primitive list using same API as smiles_to_smarts()
+ * @param radius Graph radius around each atom center (0 = center atom only)
+ * @return SMARTS fragment per atom in atom index order
+ */
+RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
+    const std::string& smiles, const std::vector<std::string>& primitiveList,
+    unsigned int radius);
+
+/**
+ * Batch generate per-atom SMARTS neighborhoods for multiple SMILES strings.
+ *
+ * @param smilesList Input SMILES strings
+ * @param primitiveList Primitive list using same API as smiles_to_smarts()
+ * @param radius Graph radius around each atom center (0 = center atom only)
+ * @return Per-molecule list of per-atom SMARTS fragments
+ */
+RDKIT_ATOMTYPER_EXPORT std::vector<std::vector<std::string>>
+smiles_to_atom_centered_smarts(
+    const std::vector<std::string>& smilesList,
+    const std::vector<std::string>& primitiveList, unsigned int radius);
+
+/**
+ * Normalize primitive list input into ordered primitive tokens.
+ *
+ * Input entries can be individual tokens or bracketed/comma-delimited groups.
+ */
+RDKIT_ATOMTYPER_EXPORT std::vector<std::string> normalize_primitive_list(
+    const std::vector<std::string>& primitiveList);
+
+/**
+ * Build a single atom SMARTS token using expression_builder primitive logic.
+ *
+ * @param atom Atom to featurize
+ * @param mol Parent molecule used for topology/ring primitives
+ * @param primitiveList Primitive list using same API as smiles_to_smarts()
+ * @param includeAtomMap Include :map in output when atom has map number
+ * @return Bracket atom SMARTS token, e.g. [#6;D3;H1:4]
+ */
+RDKIT_ATOMTYPER_EXPORT std::string build_atom_primitive_token(
+    const RDKit::Atom* atom, const RDKit::ROMol* mol,
+    const std::vector<std::string>& primitiveList,
+    bool includeAtomMap = false);
 
 /**
  * Convert a query molecule to a SMARTS string

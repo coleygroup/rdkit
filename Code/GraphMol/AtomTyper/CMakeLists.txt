@@ -3,8 +3,9 @@ rdkit_library(AtomTyper
                             atom_typer_query_reorder.cpp
               smarts_analyzer.cpp
               expression_builder.cpp
+                            reaction_extractor.cpp
             #   parser.cpp
-              LINK_LIBRARIES GraphMol SmilesParse ChemTransforms)
+                            LINK_LIBRARIES GraphMol SmilesParse ChemTransforms ChemReactions)
 target_compile_definitions(AtomTyper PRIVATE RDKIT_ATOMTYPER_BUILD)
 
 option(RDK_BUILD_TRACY "Enable Tracy profiling for AtomTyper targets" OFF)
@@ -23,6 +24,7 @@ rdkit_headers(atom_typer.hpp
                             atom_typer_query_reorder.hpp
               smarts_analyzer.hpp
               expression_builder.hpp
+                            reaction_extractor.hpp
             #   parser.hpp
               DEST GraphMol/AtomTyper)
 
@@ -34,6 +36,9 @@ rdkit_catch_test(testSmartsAnalyzer test_smarts_analyzer.cpp
 
 rdkit_catch_test(testExpressionBuilder test_expression_builder.cpp
                  LINK_LIBRARIES AtomTyper SmilesParse)
+
+rdkit_catch_test(testReactionExtractor test_reaction_extractor.cpp
+                 LINK_LIBRARIES AtomTyper SmilesParse ChemReactions)
 
 option(RDK_BUILD_ATOMTYPER_SMOKE "Build AtomTyper smoke executables" ON)
 if(RDK_BUILD_ATOMTYPER_SMOKE)
