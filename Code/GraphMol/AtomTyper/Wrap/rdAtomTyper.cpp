@@ -11,6 +11,7 @@
 #include <GraphMol/AtomTyper/reaction_extractor.hpp>
 #include <GraphMol/ChemReactions/Reaction.h>
 #include <GraphMol/GraphMol.h>
+// #include <GraphMol/Atom.h>
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/QueryBond.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
@@ -319,7 +320,30 @@ python::dict walkAtomQuery(const ATOM_QUERY *q) {
       const auto *eq =
           dynamic_cast<const Queries::EqualityQuery<int, const RDKit::Atom *, true> *>(q);
       if (eq) {
-        d["value"] = eq->getVal();
+        if (desc == "AtomHybridization") {
+              switch (eq->getVal()) {
+                case RDKit::QueryAtom::S:
+                  d["value"] = 0;
+                  break;
+                case RDKit::QueryAtom::SP:
+                  d["value"] = 1;
+                  break;
+                case RDKit::QueryAtom::SP2:
+                  d["value"] = 2;
+                  break;
+                case RDKit::QueryAtom::SP3:
+                  d["value"] = 3;
+                  break;
+                case RDKit::QueryAtom::SP3D:
+                  d["value"] = 4;
+                  break;
+                case RDKit::QueryAtom::SP3D2:
+                  d["value"] = 5;
+                  break;
+              }
+        } else{
+          d["value"] = eq->getVal();
+        }
       }
     } catch (...) {
       // not an equality query – leave value unset
@@ -526,13 +550,15 @@ python::object smilesToSmartsByPrimitives(const python::object &smiles_or_list,
 
 python::object smilesToAtomCenteredSmartsByPrimitives(
     const python::object &smiles_or_list, const python::object &primitives,
-    unsigned int radius = 0) {
+  unsigned int radius = 0, bool wildcardNeighbors = false,
+  bool includePrimitiveSubsets = false) {
   const auto primitive_list = primitivesToVector(primitives);
 
   bool was_single = false;
   const auto smiles_list = smilesInputToVector(smiles_or_list, &was_single);
   const auto out = atom_typer::smiles_to_atom_centered_smarts(
-      smiles_list, primitive_list, radius);
+      smiles_list, primitive_list, radius, wildcardNeighbors,
+      includePrimitiveSubsets);
 
   if (was_single) {
     if (out.empty()) {
@@ -710,9 +736,13 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
   python::def("smiles_to_atom_centered_smarts",
               &smilesToAtomCenteredSmartsByPrimitives,
               (python::arg("smiles"), python::arg("primitives"),
-               python::arg("radius") = 0),
+               python::arg("radius") = 0,
+               python::arg("wildcardNeighbors") = false,
+               python::arg("includePrimitiveSubsets") = false),
               "Generate per-atom SMARTS neighborhoods rooted at each atom. "
               "Accepts a SMILES string or iterable of SMILES strings. "
+              "If wildcardNeighbors=True, all non-center atoms are emitted as [*]. "
+              "If includePrimitiveSubsets=True, emits all non-empty subsets of rooted atom primitives. "
               "Returns one SMARTS fragment per atom for each input molecule.");
 
   python::def("extract_single_root_template", &extractSingleRootTemplateFromReaction,

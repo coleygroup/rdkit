@@ -91,11 +91,23 @@ RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_smarts(
  * @param smiles Input SMILES string
  * @param primitiveList Primitive list using same API as smiles_to_smarts()
  * @param radius Graph radius around each atom center (0 = center atom only)
+ * @param wildcardNeighbors If true, non-center atoms are emitted as [*]
+ * @param includePrimitiveSubsets If true, emit all non-empty primitive subsets
+ * for the rooted atom (2^n - 1 outputs per center atom for n primitives)
  * @return SMARTS fragment per atom in atom index order
  */
 RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
     const std::string& smiles, const std::vector<std::string>& primitiveList,
     unsigned int radius);
+
+RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
+    const std::string& smiles, const std::vector<std::string>& primitiveList,
+     unsigned int radius, bool wildcardNeighbors = false);
+
+RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
+    const std::string& smiles, const std::vector<std::string>& primitiveList,
+     unsigned int radius, bool wildcardNeighbors,
+     bool includePrimitiveSubsets);
 
 /**
  * Batch generate per-atom SMARTS neighborhoods for multiple SMILES strings.
@@ -103,12 +115,27 @@ RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
  * @param smilesList Input SMILES strings
  * @param primitiveList Primitive list using same API as smiles_to_smarts()
  * @param radius Graph radius around each atom center (0 = center atom only)
+ * @param wildcardNeighbors If true, non-center atoms are emitted as [*]
+ * @param includePrimitiveSubsets If true, emit all non-empty primitive subsets
+ * for the rooted atom (2^n - 1 outputs per center atom for n primitives)
  * @return Per-molecule list of per-atom SMARTS fragments
  */
 RDKIT_ATOMTYPER_EXPORT std::vector<std::vector<std::string>>
 smiles_to_atom_centered_smarts(
     const std::vector<std::string>& smilesList,
     const std::vector<std::string>& primitiveList, unsigned int radius);
+
+RDKIT_ATOMTYPER_EXPORT std::vector<std::vector<std::string>>
+smiles_to_atom_centered_smarts(
+    const std::vector<std::string>& smilesList,
+     const std::vector<std::string>& primitiveList, unsigned int radius,
+     bool wildcardNeighbors = false);
+
+RDKIT_ATOMTYPER_EXPORT std::vector<std::vector<std::string>>
+smiles_to_atom_centered_smarts(
+    const std::vector<std::string>& smilesList,
+     const std::vector<std::string>& primitiveList, unsigned int radius,
+     bool wildcardNeighbors, bool includePrimitiveSubsets);
 
 /**
  * Normalize primitive list input into ordered primitive tokens.
