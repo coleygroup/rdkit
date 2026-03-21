@@ -94,6 +94,8 @@ RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_smarts(
  * @param wildcardNeighbors If true, non-center atoms are emitted as [*]
  * @param includePrimitiveSubsets If true, emit all non-empty primitive subsets
  * for the rooted atom (2^n - 1 outputs per center atom for n primitives)
+ * @param deduplicate If true, suppress duplicate SMARTS while preserving
+ * first-occurrence order
  * @return SMARTS fragment per atom in atom index order
  */
 RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
@@ -107,7 +109,7 @@ RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
 RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
     const std::string& smiles, const std::vector<std::string>& primitiveList,
      unsigned int radius, bool wildcardNeighbors,
-     bool includePrimitiveSubsets);
+    bool includePrimitiveSubsets, bool deduplicate = false);
 
 /**
  * Batch generate per-atom SMARTS neighborhoods for multiple SMILES strings.
@@ -118,6 +120,9 @@ RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_atom_centered_smarts(
  * @param wildcardNeighbors If true, non-center atoms are emitted as [*]
  * @param includePrimitiveSubsets If true, emit all non-empty primitive subsets
  * for the rooted atom (2^n - 1 outputs per center atom for n primitives)
+ * @param deduplicate If true, suppress duplicate SMARTS globally across the
+ * entire input batch while preserving first-occurrence order. This may yield
+ * empty outputs for later molecules when all candidates were seen earlier.
  * @return Per-molecule list of per-atom SMARTS fragments
  */
 RDKIT_ATOMTYPER_EXPORT std::vector<std::vector<std::string>>
@@ -135,7 +140,8 @@ RDKIT_ATOMTYPER_EXPORT std::vector<std::vector<std::string>>
 smiles_to_atom_centered_smarts(
     const std::vector<std::string>& smilesList,
      const std::vector<std::string>& primitiveList, unsigned int radius,
-     bool wildcardNeighbors, bool includePrimitiveSubsets);
+    bool wildcardNeighbors, bool includePrimitiveSubsets,
+    bool deduplicate = false);
 
 /**
  * Normalize primitive list input into ordered primitive tokens.

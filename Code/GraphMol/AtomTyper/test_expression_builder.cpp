@@ -294,3 +294,21 @@ TEST_CASE("ExpressionBuilder: batch smiles_to_smarts handles empty list", "[Expr
                                                      atom_typer::Level::MINIMAL);
     CHECK(smarts.empty());
 }
+
+TEST_CASE("ExpressionBuilder: atom-centered deduplicate suppresses duplicates", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_atom_centered_smarts(
+        "c1ccccc1", {"[atomic_number,H,D]"}, 1, true, false, true);
+
+    REQUIRE(smarts.size() == 1);
+    CHECK(smarts.front().find("[*]") != std::string::npos);
+}
+
+TEST_CASE("ExpressionBuilder: batch atom-centered deduplicate is global across batch", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_atom_centered_smarts(
+        std::vector<std::string>{"C", "C"},
+        {"[atomic_number,H,D]"}, 1, true, false, true);
+
+    REQUIRE(smarts.size() == 2);
+    CHECK(smarts[0].size() == 1);
+    CHECK(smarts[1].empty());
+}

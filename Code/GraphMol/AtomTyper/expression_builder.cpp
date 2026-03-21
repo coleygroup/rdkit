@@ -14,6 +14,7 @@
 #include <cctype>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <map>
 
 namespace atom_typer {
@@ -127,20 +128,22 @@ int bondSerializationPriority(const RDKit::Bond *bond) {
     }
 }
 
-int bondSymbolPriority(char bondSymbol) {
-    switch (bondSymbol) {
-        case '#':
-            return 0;
-        case '=':
-            return 1;
-        case ':':
-            return 2;
-        case '-':
-            return 3;
-        case '~':
-            return 4;
+std::string bondToken(const RDKit::Bond *bond) {
+    if (!bond) {
+        return "~";
+    }
+    if (bond->getIsAromatic()) {
+        return ":";
+    }
+    switch (bond->getBondType()) {
+        case RDKit::Bond::BondType::TRIPLE:
+            return "#";
+        case RDKit::Bond::BondType::DOUBLE:
+            return "=";
+        case RDKit::Bond::BondType::SINGLE:
+            return "-";
         default:
-            return 5;
+            return "~";
     }
 }
 
@@ -172,67 +175,65 @@ std::string bracketUnbracketedWildcardAtoms(const std::string &smarts) {
     return out;
 }
 
-std::string normalizeTwoWildcardNeighborPermutation(
-    const std::string &smarts) {
-    if (smarts.empty() || smarts.front() != '[') {
-        return smarts;
-    }
+std::string buildWildcardNeighborSmarts(
+    const RDKit::ROMol &mol, unsigned int centerIdx,
+    const RDKit::PATH_TYPE &environmentBonds,
+    const std::string &rootAtomToken) {
+    std::vector<const RDKit::Bond *> centerBonds;
+    centerBonds.reserve(environmentBonds.size());
 
-    size_t rootEnd = std::string::npos;
-    int bracketDepth = 0;
-    for (size_t i = 0; i < smarts.size(); ++i) {
-        const char ch = smarts[i];
-        if (ch == '[') {
-            ++bracketDepth;
-        } else if (ch == ']') {
-            --bracketDepth;
-            if (bracketDepth == 0) {
-                rootEnd = i;
-                break;
-            }
+    for (const auto bondIdx : environmentBonds) {
+        const auto *bond = mol.getBondWithIdx(static_cast<unsigned int>(bondIdx));
+        if (!bond) {
+            continue;
+        }
+        if (bond->getBeginAtomIdx() == centerIdx ||
+            bond->getEndAtomIdx() == centerIdx) {
+            centerBonds.push_back(bond);
         }
     }
-    if (rootEnd == std::string::npos || rootEnd + 1 >= smarts.size()) {
-        return smarts;
+
+    if (centerBonds.empty()) {
+        return rootAtomToken;
     }
 
-    // Normalize: [root](bond1[*])bond2[*] where both neighbors are wildcard leaves.
-    // If needed, swap bond1/bond2 so branch ordering is deterministic.
-    size_t pos = rootEnd + 1;
-    if (smarts[pos] != '(' || pos + 6 >= smarts.size()) {
-        return smarts;
+    std::stable_sort(centerBonds.begin(), centerBonds.end(),
+                     [&](const RDKit::Bond *lhs, const RDKit::Bond *rhs) {
+                         const int lhsPriority = bondSerializationPriority(lhs);
+                         const int rhsPriority = bondSerializationPriority(rhs);
+                         if (lhsPriority != rhsPriority) {
+                             return lhsPriority < rhsPriority;
+                         }
+
+                         const unsigned int lhsOther =
+                             lhs->getBeginAtomIdx() == centerIdx
+                                 ? lhs->getEndAtomIdx()
+                                 : lhs->getBeginAtomIdx();
+                         const unsigned int rhsOther =
+                             rhs->getBeginAtomIdx() == centerIdx
+                                 ? rhs->getEndAtomIdx()
+                                 : rhs->getBeginAtomIdx();
+                         if (lhsOther != rhsOther) {
+                             return lhsOther < rhsOther;
+                         }
+
+                         return lhs->getIdx() < rhs->getIdx();
+                     });
+
+    std::string out = rootAtomToken;
+    if (centerBonds.size() == 1) {
+        out += bondToken(centerBonds.front()) + "[*]";
+        return out;
     }
 
-    const char branchBond = smarts[pos + 1];
-    if (smarts.compare(pos + 2, 3, "[*]") != 0 || smarts[pos + 5] != ')') {
-        return smarts;
+    for (size_t i = 0; i < centerBonds.size(); ++i) {
+        const std::string segment = bondToken(centerBonds[i]) + "[*]";
+        if (i + 1 == centerBonds.size()) {
+            out += segment;
+        } else {
+            out += "(" + segment + ")";
+        }
     }
-
-    const size_t tailPos = pos + 6;
-    if (tailPos + 3 >= smarts.size()) {
-        return smarts;
-    }
-    const char tailBond = smarts[tailPos];
-    if (smarts.compare(tailPos + 1, 3, "[*]") != 0 ||
-        tailPos + 4 != smarts.size()) {
-        return smarts;
-    }
-
-    const int branchPriority = bondSymbolPriority(branchBond);
-    const int tailPriority = bondSymbolPriority(tailBond);
-    if (branchPriority < tailPriority ||
-        (branchPriority == tailPriority && branchBond <= tailBond)) {
-        return smarts;
-    }
-
-    std::string out;
-    out.reserve(smarts.size());
-    out.append(smarts, 0, rootEnd + 1);
-    out.push_back('(');
-    out.push_back(tailBond);
-    out += "[*])";
-    out.push_back(branchBond);
-    out += "[*]";
     return out;
 }
 
@@ -516,7 +517,8 @@ std::string smilesToSmartsFromNormalizedPrimitives(
 std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
     const std::string &smiles, const std::vector<std::string> &tokens,
     unsigned int radius, bool wildcardNeighbors,
-    bool includePrimitiveSubsets) {
+    bool includePrimitiveSubsets, bool deduplicate,
+    std::unordered_set<std::string> *seen) {
     if (smiles.empty()) {
         throw std::invalid_argument("Input SMILES string is empty");
     }
@@ -533,6 +535,18 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
     if (!includePrimitiveSubsets) {
         out.reserve(mol->getNumAtoms());
     }
+    std::unordered_set<std::string> localSeen;
+    if (deduplicate && !seen) {
+        localSeen.reserve(mol->getNumAtoms());
+        seen = &localSeen;
+    }
+
+    auto appendOut = [&](const std::string &value) {
+        if (!deduplicate || seen->insert(value).second) {
+            out.push_back(value);
+        }
+    };
+
     for (size_t centerIdx = 0; centerIdx < mol->getNumAtoms(); ++centerIdx) {
         std::unordered_map<unsigned int, unsigned int> atomDistanceMap;
         const RDKit::PATH_TYPE environmentBonds =
@@ -615,29 +629,38 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
             }
         }
 
-        std::unique_ptr<RDKit::ROMol> orderedEnvSubmol =
-            reorderSubmolBondsDeterministically(*envSubmol, atomIdxMap,
-                                                static_cast<unsigned int>(centerIdx));
-
-        RDKit::SmilesWriteParams params;
-        params.doIsomericSmiles = true;
-        params.allBondsExplicit = true;
-        params.canonical = false;
-        params.rootedAtAtom = centerIt->second;
-        std::string smartsOut = bracketUnbracketedWildcardAtoms(
-            RDKit::MolToSmarts(*orderedEnvSubmol, params));
+        std::string smartsOut;
         if (wildcardNeighbors) {
-            smartsOut = normalizeTwoWildcardNeighborPermutation(smartsOut);
+            const auto centerAtom = mol->getAtomWithIdx(
+                static_cast<unsigned int>(centerIdx));
+            const std::string rootToken =
+                buildAtomPrimitiveTokenFromTokens(centerAtom, mol.get(), tokens,
+                                                  false);
+            smartsOut = buildWildcardNeighborSmarts(
+                *mol, static_cast<unsigned int>(centerIdx), environmentBonds,
+                rootToken);
+        } else {
+            std::unique_ptr<RDKit::ROMol> orderedEnvSubmol =
+                reorderSubmolBondsDeterministically(*envSubmol, atomIdxMap,
+                                                    static_cast<unsigned int>(centerIdx));
+
+            RDKit::SmilesWriteParams params;
+            params.doIsomericSmiles = true;
+            params.allBondsExplicit = true;
+            params.canonical = false;
+            params.rootedAtAtom = centerIt->second;
+            smartsOut = bracketUnbracketedWildcardAtoms(
+                RDKit::MolToSmarts(*orderedEnvSubmol, params));
         }
 
         if (!includePrimitiveSubsets) {
-            out.push_back(smartsOut);
+            appendOut(smartsOut);
             continue;
         }
 
         const size_t rootEnd = rootedAtomTokenEnd(smartsOut);
         if (rootEnd == std::string::npos) {
-            out.push_back(smartsOut);
+            appendOut(smartsOut);
             continue;
         }
 
@@ -647,13 +670,13 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
 
         // Emit full primitive token first for backwards-friendly ordering,
         // then all remaining non-empty subsets.
-        out.push_back(buildAtomTokenFromPrimitiveValues(centerPrimitiveValues,
-                                                        fullMask) +
-                      suffix);
+        appendOut(buildAtomTokenFromPrimitiveValues(centerPrimitiveValues,
+                                                    fullMask) +
+                  suffix);
         for (std::uint64_t mask = fullMask - 1; mask > 0; --mask) {
-            out.push_back(
-                buildAtomTokenFromPrimitiveValues(centerPrimitiveValues, mask) +
-                suffix);
+            appendOut(buildAtomTokenFromPrimitiveValues(centerPrimitiveValues,
+                                                        mask) +
+                      suffix);
         }
     }
 
@@ -809,31 +832,34 @@ std::vector<std::string> smiles_to_atom_centered_smarts(
     const std::string &smiles, const std::vector<std::string> &primitiveList,
     unsigned int radius) {
     return smiles_to_atom_centered_smarts(smiles, primitiveList, radius,
-                                          false, false);
+                                          false, false, false);
 }
 
 std::vector<std::string> smiles_to_atom_centered_smarts(
     const std::string &smiles, const std::vector<std::string> &primitiveList,
     unsigned int radius, bool wildcardNeighbors) {
     return smiles_to_atom_centered_smarts(smiles, primitiveList, radius,
-                                          wildcardNeighbors, false);
+                                          wildcardNeighbors, false, false);
 }
 
 std::vector<std::string> smiles_to_atom_centered_smarts(
     const std::string &smiles, const std::vector<std::string> &primitiveList,
-    unsigned int radius, bool wildcardNeighbors, bool includePrimitiveSubsets) {
+    unsigned int radius, bool wildcardNeighbors,
+    bool includePrimitiveSubsets, bool deduplicate) {
     const std::vector<std::string> tokens = normalize_primitive_list(primitiveList);
     return smilesToAtomCenteredSmartsFromNormalizedPrimitives(smiles, tokens,
                                                               radius,
                                                               wildcardNeighbors,
-                                                              includePrimitiveSubsets);
+                                                              includePrimitiveSubsets,
+                                                              deduplicate,
+                                                              nullptr);
 }
 
 std::vector<std::vector<std::string>> smiles_to_atom_centered_smarts(
     const std::vector<std::string> &smilesList,
     const std::vector<std::string> &primitiveList, unsigned int radius) {
     return smiles_to_atom_centered_smarts(smilesList, primitiveList, radius,
-                                          false, false);
+                                          false, false, false);
 }
 
 std::vector<std::vector<std::string>> smiles_to_atom_centered_smarts(
@@ -841,23 +867,30 @@ std::vector<std::vector<std::string>> smiles_to_atom_centered_smarts(
     const std::vector<std::string> &primitiveList, unsigned int radius,
     bool wildcardNeighbors) {
     return smiles_to_atom_centered_smarts(smilesList, primitiveList, radius,
-                                          wildcardNeighbors, false);
+                                          wildcardNeighbors, false, false);
 }
 
 std::vector<std::vector<std::string>> smiles_to_atom_centered_smarts(
     const std::vector<std::string> &smilesList,
     const std::vector<std::string> &primitiveList, unsigned int radius,
-    bool wildcardNeighbors, bool includePrimitiveSubsets) {
+    bool wildcardNeighbors, bool includePrimitiveSubsets,
+    bool deduplicate) {
     const std::vector<std::string> tokens = normalize_primitive_list(primitiveList);
 
     std::vector<std::vector<std::string>> out;
     out.reserve(smilesList.size());
+    std::unordered_set<std::string> seen;
+    if (deduplicate) {
+        seen.reserve(smilesList.size() * 4);
+    }
     for (const auto &smiles : smilesList) {
         out.push_back(smilesToAtomCenteredSmartsFromNormalizedPrimitives(smiles,
                                                                           tokens,
                                                                           radius,
                                                                           wildcardNeighbors,
-                                                                          includePrimitiveSubsets));
+                                                                          includePrimitiveSubsets,
+                                                                          deduplicate,
+                                                                          deduplicate ? &seen : nullptr));
     }
     return out;
 }

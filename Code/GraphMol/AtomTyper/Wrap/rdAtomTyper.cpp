@@ -5,6 +5,8 @@
 #include <boost/noncopyable.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <unordered_set>
+
 #include <GraphMol/AtomTyper/atom_typer.hpp>
 #include <GraphMol/AtomTyper/smarts_analyzer.hpp>
 #include <GraphMol/AtomTyper/expression_builder.hpp>
@@ -551,14 +553,14 @@ python::object smilesToSmartsByPrimitives(const python::object &smiles_or_list,
 python::object smilesToAtomCenteredSmartsByPrimitives(
     const python::object &smiles_or_list, const python::object &primitives,
   unsigned int radius = 0, bool wildcardNeighbors = false,
-  bool includePrimitiveSubsets = false) {
+  bool includePrimitiveSubsets = false, bool deduplicate = false) {
   const auto primitive_list = primitivesToVector(primitives);
 
   bool was_single = false;
   const auto smiles_list = smilesInputToVector(smiles_or_list, &was_single);
   const auto out = atom_typer::smiles_to_atom_centered_smarts(
       smiles_list, primitive_list, radius, wildcardNeighbors,
-      includePrimitiveSubsets);
+      includePrimitiveSubsets, deduplicate);
 
   if (was_single) {
     if (out.empty()) {
@@ -566,6 +568,20 @@ python::object smilesToAtomCenteredSmartsByPrimitives(
     }
     return vectorStringToList(out.front());
   }
+
+  if (deduplicate) {
+    std::vector<std::string> flattened;
+    size_t totalSize = 0;
+    for (const auto &perMol : out) {
+      totalSize += perMol.size();
+    }
+    flattened.reserve(totalSize);
+    for (const auto &perMol : out) {
+      flattened.insert(flattened.end(), perMol.begin(), perMol.end());
+    }
+    return vectorStringToList(flattened);
+  }
+
   return vectorVectorStringToList(out);
 }
 
@@ -738,12 +754,16 @@ BOOST_PYTHON_MODULE(rdAtomTyper) {
               (python::arg("smiles"), python::arg("primitives"),
                python::arg("radius") = 0,
                python::arg("wildcardNeighbors") = false,
-               python::arg("includePrimitiveSubsets") = false),
+               python::arg("includePrimitiveSubsets") = false,
+               python::arg("deduplicate") = false),
               "Generate per-atom SMARTS neighborhoods rooted at each atom. "
               "Accepts a SMILES string or iterable of SMILES strings. "
               "If wildcardNeighbors=True, all non-center atoms are emitted as [*]. "
               "If includePrimitiveSubsets=True, emits all non-empty subsets of rooted atom primitives. "
-              "Returns one SMARTS fragment per atom for each input molecule.");
+              "If deduplicate=True, duplicate SMARTS are removed while preserving first occurrence order. "
+              "For iterable input with deduplicate=True, deduplication is global across the whole batch "
+              "and a single flattened list is returned. "
+              "Otherwise returns one SMARTS fragment list per input molecule.");
 
   python::def("extract_single_root_template", &extractSingleRootTemplateFromReaction,
               (python::arg("reaction"), python::arg("primitives"),
