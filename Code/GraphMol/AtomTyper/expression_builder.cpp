@@ -884,6 +884,7 @@ std::vector<std::vector<std::string>> smiles_to_atom_centered_smarts(
         seen.reserve(smilesList.size() * 4);
     }
     for (const auto &smiles : smilesList) {
+        try {
         out.push_back(smilesToAtomCenteredSmartsFromNormalizedPrimitives(smiles,
                                                                           tokens,
                                                                           radius,
@@ -891,6 +892,11 @@ std::vector<std::vector<std::string>> smiles_to_atom_centered_smarts(
                                                                           includePrimitiveSubsets,
                                                                           deduplicate,
                                                                           deduplicate ? &seen : nullptr));
+        } catch (const std::exception &e) {
+            // If there's an error processing a SMILES string, log it and continue with the next one
+            std::cerr << "Error processing SMILES '" << smiles << "': " << e.what() << std::endl;
+            out.push_back({}); // Add an empty vector for this entry to maintain alignment with input list
+        }   
     }
     return out;
 }
