@@ -533,10 +533,6 @@ void set_comparison_trace_enabled(bool enabled) {
   g_comparison_trace_enabled = enabled;
 }
 
-bool comparison_trace_enabled() {
-  return g_comparison_trace_enabled;
-}
-
 std::string reorder_query_tree_by_embedding_smarts(
     const std::string &smarts, const std::map<std::string, double> &embedding) {
   if (smarts.empty()) {
@@ -567,20 +563,6 @@ std::string reorder_query_tree_by_embedding_smarts(
   }
 
   return force_atom_identity_first_in_smarts(RDKit::MolToSmarts(rewritten));
-}
-
-std::vector<std::string> reorder_patterns_by_embedding(
-    const std::vector<std::string> &patterns,
-    const std::map<std::string, double> &embedding) {
-  std::vector<std::string> out;
-  out.reserve(patterns.size());
-  for (const auto &p : patterns) {
-    if (p.empty()) {
-      continue;
-    }
-    out.push_back(reorder_query_tree_by_embedding_smarts(p, embedding));
-  }
-  return out;
 }
 
 }  // namespace atom_typer::query_reorder

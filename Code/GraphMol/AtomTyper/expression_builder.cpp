@@ -5,7 +5,6 @@
 #include <GraphMol/Subgraphs/Subgraphs.h>
 #include <GraphMol/Subgraphs/SubgraphUtils.h>
 #include <GraphMol/QueryAtom.h>
-#include <GraphMol/PeriodicTable.h>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -18,8 +17,6 @@
 #include <map>
 
 namespace atom_typer {
-
-std::string getElementSymbol(int atomicNum);
 
 namespace {
 
@@ -94,19 +91,6 @@ std::vector<std::string> normalizePrimitiveList(
                      });
 
     return tokens;
-}
-
-std::vector<std::string> primitivesForLevel(Level level) {
-    if (level == Level::MINIMAL) {
-        return {"element"};
-    }
-    if (level == Level::STANDARD) {
-        return {"element", "D"};
-    }
-    if (level == Level::DETAILED) {
-        return {"element", "D", "H"};
-    }
-    return {"element", "a", "D", "H", "charge", "v", "R", "r", "X", "x"};
 }
 
 int bondSerializationPriority(const RDKit::Bond *bond) {
@@ -685,11 +669,6 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
 
 }  // namespace
 
-// Helper function to get element symbol from atomic number
-std::string getElementSymbol(int atomicNum) {
-    return RDKit::PeriodicTable::getTable()->getElementSymbol(atomicNum);
-}
-
 std::vector<std::string> normalize_primitive_list(
     const std::vector<std::string> &primitiveList) {
     return normalizePrimitiveList(primitiveList);
@@ -706,107 +685,6 @@ std::string build_atom_primitive_token(
         throw std::invalid_argument("Primitive list is empty");
     }
     return buildAtomPrimitiveTokenFromTokens(atom, mol, tokens, includeAtomMap);
-}
-
-/**
- * Convert a query molecule to a SMARTS string based on detail level
- * 
- * @param mol Original molecule (for accessing atom properties)
- * @param queryMol Query molecule built with appropriate query features
- * @param level Detail level for formatting the SMARTS string
- * @return Formatted SMARTS string
- */
-std::string queryMoleculeToSmarts(const RDKit::ROMol* mol, 
-                                   const RDKit::RWMol* queryMol,
-                                   Level level) {
-    std::stringstream ss;
-    
-    if (level == Level::MINIMAL) {
-        // Format: [C][C][O]
-        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
-            const auto atom = mol->getAtomWithIdx(i);
-            ss << "[" << getElementSymbol(atom->getAtomicNum()) << "]";
-        }
-    }
-    else if (level == Level::STANDARD) {
-        // Format: [C;D1][C;D2][O;D1]
-        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
-            const auto atom = mol->getAtomWithIdx(i);
-            ss << "[" << getElementSymbol(atom->getAtomicNum()) 
-               << ";D" << atom->getDegree() << "]";
-        }
-    }
-    else if (level == Level::DETAILED) {
-        // Format: [C;D1;H3][C;D2;H2][O;D1;H1]
-        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
-            const auto atom = mol->getAtomWithIdx(i);
-            ss << "[" << getElementSymbol(atom->getAtomicNum())
-               << ";D" << atom->getDegree()
-               << ";H" << atom->getTotalNumHs(true) << "]";
-        }
-    }
-    else if (level == Level::COMPLETE) {
-        // Use RDKit's MolToSmarts for complete level
-        return RDKit::MolToSmarts(*queryMol);
-    }
-    
-    return ss.str();
-}
-
-/**
- * Convert a SMILES string to a SMARTS pattern with specified detail level
- * 
- * @param smiles Input SMILES string
- * @param level Detail level for the SMARTS pattern
- * @return SMARTS string representation
- */
-std::string smiles_to_smarts(const std::string& smiles, Level level) {
-    if (smiles.empty()) {
-        throw std::invalid_argument("Input SMILES string is empty");
-    }
-
-    std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles));
-    if (!mol) {
-        throw std::invalid_argument("Invalid SMILES string");
-    }
-
-    std::stringstream ss;
-    if (level == Level::MINIMAL) {
-        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
-            const auto atom = mol->getAtomWithIdx(i);
-            ss << "[" << getElementSymbol(atom->getAtomicNum()) << "]";
-        }
-        return ss.str();
-    }
-    if (level == Level::STANDARD) {
-        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
-            const auto atom = mol->getAtomWithIdx(i);
-            ss << "[" << getElementSymbol(atom->getAtomicNum())
-               << ";D" << atom->getDegree() << "]";
-        }
-        return ss.str();
-    }
-    if (level == Level::DETAILED) {
-        for (size_t i = 0; i < mol->getNumAtoms(); ++i) {
-            const auto atom = mol->getAtomWithIdx(i);
-            ss << "[" << getElementSymbol(atom->getAtomicNum())
-               << ";D" << atom->getDegree()
-               << ";H" << atom->getTotalNumHs(true) << "]";
-        }
-        return ss.str();
-    }
-
-    return smiles_to_smarts(smiles, primitivesForLevel(level));
-}
-
-std::vector<std::string> smiles_to_smarts(const std::vector<std::string> &smilesList,
-                                          Level level) {
-    std::vector<std::string> out;
-    out.reserve(smilesList.size());
-    for (const auto &smiles : smilesList) {
-        out.push_back(smiles_to_smarts(smiles, level));
-    }
-    return out;
 }
 
 std::string smiles_to_smarts(const std::string &smiles,

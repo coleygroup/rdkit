@@ -1,478 +1,726 @@
-#include <GraphMol/AtomTyper/smarts_analyzer.hpp>
 #include <GraphMol/AtomTyper/atom_typer.hpp>
-#include <iostream>
+#include <GraphMol/AtomTyper/expression_builder.hpp>
+#include <GraphMol/AtomTyper/reaction_extractor.hpp>
+#include <GraphMol/GraphMol.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
+#include <GraphMol/Substruct/SubstructMatch.h>
+
+#include <catch2/catch_all.hpp>
+
+#include <algorithm>
+#include <map>
+#include <set>
+#include <stdexcept>
 #include <string>
-#include <vector>
 #include <tuple>
+#include <vector>
 
-int main() {
-  // Each entry: { description, smarts_A, smarts_B }
-  // Both should produce the same standardized output.
-  const std::vector<std::tuple<std::string, std::string, std::string>> test_cases = {
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts minimal", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"element"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      // ── 1. Atomic number vs element symbol ──
-      {"Carbon: #6 vs C",
-       "[#6;X4;H3]",
-       "[C;X4;H3]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts standard", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"element", "D"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Nitrogen: #7 vs N",
-       "[#7;H2;D1]",
-       "[N;H2;D1]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts detailed", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"element", "D", "H"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Aromatic carbon: #6&a vs c",
-       "[#6&a]",
-       "[c]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts aromatic minimal", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("c1ccccc1", {"element", "a", "D"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("c1ccccc1"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Aromatic nitrogen: #7&a vs n",
-       "[#7&a]",
-       "[n]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts branched standard", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CC(C)C", {"element", "D"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CC(C)C"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Sulfur: #16 vs S",
-       "[#16;X2;H1]",
-       "[S;X2;H1]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts charged detailed", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("[NH4+]", {"element", "D", "H", "charge"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("[NH4+]"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      // ── 2. Operator reordering (AND high vs AND low) ──
-      {"AND operator order: H before D vs D before H",
-       "[C;H0;D3]",
-       "[C;D3;H0]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts nitrogen detailed", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCN", {"element", "D", "H"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCN"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Nested AND: charge before degree",
-       "[N;+1;D3;H0]",
-       "[N;H0;D3;+1]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts empty string throws", "[ExpressionBuilder]") {
+    CHECK_THROWS_AS(atom_typer::smiles_to_smarts("", {"element"}), std::invalid_argument);
+  }
 
-      // ── 3. High-precedence & vs low-precedence ; ──
-      {"High-AND vs low-AND mixing",
-       "[C&H0&D3;+0]",
-       "[C;H0;D3;+0]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts invalid SMILES throws", "[ExpressionBuilder]") {
+    CHECK_THROWS_AS(atom_typer::smiles_to_smarts("CCCZ", {"element"}), std::invalid_argument);
+  }
 
-      {"All high-AND",
-       "[N&H1&D2&+0]",
-       "[N;H1;D2;+0]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts empty primitive list throws", "[ExpressionBuilder]") {
+    CHECK_THROWS_AS(atom_typer::smiles_to_smarts("CCO", {}), std::invalid_argument);
+  }
 
-      // ── 4. Redundant aromaticity primitives ──
-      {"Aromatic carbon: c&a vs c",
-       "[c&a]",
-       "[c]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts sulfur minimal", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCS", {"element"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCS"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Aliphatic carbon: C&A vs C",
-       "[C&A]",
-       "[C]"},
+  TEST_CASE("ExpressionBuilder: SmilesToSmarts multiple heteroatoms standard", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("C(N)O", {"element", "D"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("C(N)O"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumAtoms() == target->getNumAtoms());
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Atomic num + aromatic flag: #6&a vs c",
-       "[#6&a;H1;D2]",
-       "[c;H1;D2]"},
+  TEST_CASE("ExpressionBuilder: primitive list supports bracket syntax", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"[atomic_number,D,R]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"Atomic num + aliphatic flag: #6&A vs C",
-       "[#6&A;H3;D1]",
-       "[C;H3;D1]"},
+  TEST_CASE("ExpressionBuilder: primitive list without element", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("C1CC1", {"[R,D]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("C1CC1"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      // ── 5. OR branches in different orders ──
-      {"OR branch order: F,Cl,Br vs Br,Cl,F",
-       "[C]([F,Cl,Br])",
-       "[C]([Br,Cl,F])"},
+  TEST_CASE("ExpressionBuilder: primitive list with charge", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("[NH4+]", {"[charge, R, D]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("[NH4+]"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      {"OR charge order",
-       "[N;+0,+1]",
-       "[N;+1,+0]"},
+  TEST_CASE("ExpressionBuilder: primitive list includes total degree and ring bond count", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("C1CC1", {"[X,x]"});
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts));
+    std::unique_ptr<RDKit::ROMol> target(RDKit::SmilesToMol("C1CC1"));
+    REQUIRE(query != nullptr);
+    REQUIRE(target != nullptr);
+    CHECK(query->getNumBonds() == target->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target, *query).size() > 0);
+  }
 
-      // ── 6. Negation equivalences ──
-      {"Negation with element normalization",
-       "[C;!H0]",
-       "[#6;A;!H0]"},
+  TEST_CASE("ExpressionBuilder: primitive list rejects unknown primitive", "[ExpressionBuilder]") {
+    CHECK_THROWS_AS(atom_typer::smiles_to_smarts("CCO", {"[X,not_a_primitive]"}),
+            std::invalid_argument);
+  }
 
-      {"Ring constraint: R vs !R0 (in ring)",
-       "[C;R]",
-       "[C;!R0]"},
+  TEST_CASE("ExpressionBuilder: atomic number is always first when present", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"[D,R,atomic_number]"});
+    CHECK(smarts.find("[#6") != std::string::npos);
+    CHECK(smarts.find("-") != std::string::npos);
+  }
 
-      // ── 7. Recursive SMARTS with equivalent anchors ──
-      {"Recursive anchor: bracket vs organic subset",
-       "[N;$([N]C=O)]",
-       "[N;$([N][C]=O)]"},
+  TEST_CASE("ExpressionBuilder: element symbol is moved ahead of other primitives", "[ExpressionBuilder]") {
+    const std::string smarts = atom_typer::smiles_to_smarts("CCO", {"[D,R,element]"});
+    CHECK(smarts.find("[C") != std::string::npos);
+    CHECK(smarts.find("-") != std::string::npos);
+  }
 
-      {"Recursive with aromatic anchor",
-       "[C;$(C-c)]",
-       "[C;$(C-[#6&a])]"},
+  TEST_CASE("ExpressionBuilder: batch smiles_to_smarts by primitive list", "[ExpressionBuilder]") {
+    const std::vector<std::string> smarts = atom_typer::smiles_to_smarts(
+      std::vector<std::string>{"CCO", "C1CC1"}, {"[atomic_number,D]"});
+    REQUIRE(smarts.size() == 2);
 
-      // ── 8. Ring membership ──
-      {"Not in ring: !R vs R0",
-       "[C;!R;D3]",
-       "[C;R0;D3]"},
+    std::unique_ptr<RDKit::ROMol> query1(RDKit::SmartsToMol(smarts[0]));
+    std::unique_ptr<RDKit::ROMol> target1(RDKit::SmilesToMol("CCO"));
+    REQUIRE(query1 != nullptr);
+    REQUIRE(target1 != nullptr);
+    CHECK(query1->getNumBonds() == target1->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target1, *query1).size() > 0);
 
-      // ── 9. Connectivity X vs D equivalence (when no implicit H ambiguity) ──
-      {"Explicit degree on saturated carbon",
-       "[C;X4;H0;D4]",
-       "[C;D4;H0;X4]"},
+    std::unique_ptr<RDKit::ROMol> query2(RDKit::SmartsToMol(smarts[1]));
+    std::unique_ptr<RDKit::ROMol> target2(RDKit::SmilesToMol("C1CC1"));
+    REQUIRE(query2 != nullptr);
+    REQUIRE(target2 != nullptr);
+    CHECK(query2->getNumBonds() == target2->getNumBonds());
+    CHECK(RDKit::SubstructMatch(*target2, *query2).size() > 0);
+  }
 
-      // ── 10. Multi-atom patterns with bond type variations ──
-      {"Bond type: explicit single vs default",
-       "[C]-[C]",
-       "[C][C]"},
+  TEST_CASE("ExpressionBuilder: batch smiles_to_smarts handles empty list", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_smarts(std::vector<std::string>{},
+                             std::vector<std::string>{"element"});
+    CHECK(smarts.empty());
+  }
 
-      {"Aromatic bond: colon vs lowercase",
-       "[c]:[c]",
-       "c:c"},
+  TEST_CASE("ExpressionBuilder: atom-centered deduplicate suppresses duplicates", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_atom_centered_smarts(
+      "c1ccccc1", {"[atomic_number,H,D]"}, 1, true, false, true);
 
-      {"Ring bond between aromatic atoms",
-       "[c]:[n]:[c]",
-       "c:n:c"},
+    REQUIRE(smarts.size() == 1);
+    CHECK(smarts.front().find("[*]") != std::string::npos);
+  }
 
-      // ── 11. Complex mixed patterns ──
-      {"Carbonyl: AND notation variants",
-       "[CX3](=[OX1])[#6]",
-       "[C&X3](=[O&X1])[#6]"},
+  TEST_CASE("ExpressionBuilder: batch atom-centered deduplicate is global across batch", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_atom_centered_smarts(
+      std::vector<std::string>{"C", "C"}, {"[atomic_number,H,D]"}, 1,
+      true, false, true);
 
-      {"Amide nitrogen",
-       "[NX3;H1][CX3](=[OX1])[#6]",
-       "[N;X3;H1][C;X3](=[O;X1])[#6]"},
+    REQUIRE(smarts.size() == 2);
+    CHECK(smarts[0].size() == 1);
+    CHECK(smarts[1].empty());
+  }
 
-      {"Sulfonamide",
-       "[N][SX4](=[OX1])(=[OX1])[#6]",
-       "[N][S;X4](=[O;X1])(=[O;X1])[#6]"},
+  TEST_CASE("ReactionExtractor: reaction smiles extraction", "[ReactionExtractor]") {
+    const std::string rxn = "[CH3:1][Br:2].[OH:3]>>[CH3:1][OH:3].[Br-:2]";
+    const auto results = atom_typer::extract_single_root_template(
+      rxn, {"[atomic_number,D,H,charge]"}, 2, false, true);
 
-      // ── 12. Charge notation equivalences ──
-      {"Positive charge: +1 vs +",
-       "[N;+1;H0;D3]",
-       "[N;+;H0;D3]"},
+    REQUIRE(results.size() == 3);
+    CHECK(std::get<0>(results[0]) == 0);
+    CHECK(std::get<0>(results[1]) == 1);
+    CHECK(std::get<0>(results[2]) == 2);
+    CHECK(std::get<1>(results[0]).find(">>") != std::string::npos);
+    CHECK(std::get<1>(results[0]).find(":1") != std::string::npos);
+    CHECK(std::get<1>(results[0]).find("#") != std::string::npos);
+  }
 
-      {"Negative charge: -1 vs -",
-       "[O;-1;H0;D1]",
-       "[O;-;H0;D1]"},
+  TEST_CASE("ReactionExtractor: primitive list required", "[ReactionExtractor]") {
+    const std::string rxn = "[CH3:1][Br:2].[OH:3]>>[CH3:1][OH:3].[Br-:2]";
+    CHECK_THROWS_AS(atom_typer::extract_single_root_template(
+              rxn, {}, 1, false, true),
+            std::invalid_argument);
+  }
 
-      {"Neutral: +0 explicit",
-       "[C;+0;H3;D1]",
-       "[C;H3;D1;+0]"},
+  TEST_CASE("ReactionExtractor: invalid reaction text throws", "[ReactionExtractor]") {
+    CHECK_THROWS_AS(atom_typer::extract_single_root_template(
+              "not-a-reaction", {"element"}, 1, false, true),
+            std::invalid_argument);
+  }
 
-      // ── 13. Wildcard / any-atom equivalences ──
-      {"Any atom: AND notation",
-       "[*;H0]",
-       "[*&H0]"},
-
-      // ── 14. Degree constraints with implicit coverage ──
-      {"Degree on aromatic nitrogen",
-       "[n;H0;D2]",
-       "[n;D2;H0]"},
-
-      {"Degree on aromatic sulfur",
-       "[s;D2;H0]",
-       "[#16&a;D2;H0]"},
-
-      // ── 15. Patterns from real force fields ──
-      {"GAFF-style sp3 carbon",
-       "[C;X4;!D4]-[C;D3]",
-       "[#6;A;X4;!D4]-[#6;A;D3]"},
-
-      {"Thiol",
-       "[S;X2;H1][#6]",
-       "[#16;X2;H1][#6]"},
-
-      {"Primary amine",
-       "[N;X3;H2;D1;+0]",
-       "[#7;A;H2;D1;+0;X3]"},
-
-      {"Aromatic ring nitrogen in 6-ring",
-       "[n;H0;D2;$(a1aaaaa1)]",
-       "[#7&a;H0;D2;$(a1aaaaa1)]"},
-
-      {"Ether oxygen",
-       "[O;X2;H0;!R][C;!R]",
-       "[#8;A;X2;H0;R0][#6;A;R0]"},
-
-      // ── 16. Hydrogen count: total vs explicit ──
-      {"Total H count",
-       "[C;H2;D2]",
-       "[#6;A;H2;D2]"},
-
-      // ── 17. Complex recursive with hoist ──
-      {"Recursive with hoistable anchor on aromatic S",
-       "[#6]:[#16;$(a1aaaa1)]",
-       "[#6]:[s;$(a1aaaa1)]"},
-
-      {"Negated recursive preserved",
-       "[C;!$(C=O)]",
-       "[#6;A;!$(C=O)]"},
-
-      // ── 18. Multi-bond patterns ──
-      {"Double bond carbonyl",
-       "[C]=[O]",
-       "[#6;A]=[#8]"},
-
-      {"Triple bond nitrile",
-       "[C]#[N]",
-       "[#6;A]#[#7]"},
-
-      // ── 19. Negated recursive handling (recent fix) ──
-      {"Negated recursive with element normalization",
-       "[C;!$(C=O)]",
-       "[#6;A;!$(C=O)]"},
-
-      {"Negated recursive: bracket notation variant",
-       "[C;!$(C=O)]",
-       "[C;!$([C]=O)]"},
-
-      // ── 20. OR arm deduplication (recent fix) ──
-      {"Duplicate recursive OR arms collapsed",
-       "[N;$(NC),$(NO),$(NC)]",
-       "[N;$(NC),$(NO)]"},
-
-      {"Recursive OR arm order independence",
-       "[C;$(CF),$(CCl),$(CBr)]",
-       "[C;$(CBr),$(CCl),$(CF)]"},
-
-      // ── 21. AND-child recursive dedup (recent fix) ──
-      {"Duplicate negated recursive in AND deduped",
-       "[C;!$(C=O);!$(C=O)]",
-       "[C;!$(C=O)]"},
-
-        // ── 22. Patterns that should NOT match each other ──
-      // (Negative tests — outputs should differ)
-      // These are separated so we can test both positive and negative cases.
+  struct AtomTyperFixture {
+    atom_typer::AtomTyper typer;
   };
 
-  // Negative test cases: these should produce DIFFERENT standardized output
-  const std::vector<std::tuple<std::string, std::string, std::string>> negative_cases = {
-      {"Aromatic vs aliphatic carbon",
-       "[c]",
-       "[C]"},
-
-      {"Different charges",
-       "[N;+1]",
-       "[N;-1]"},
-
-      {"Different H counts",
-       "[C;H0]",
-       "[C;H3]"},
-
-      {"In ring vs not in ring",
-       "[C;R]",
-       "[C;!R]"},
-
-      {"Different degree",
-       "[C;D2]",
-       "[C;D4]"},
-  };
-
-  atom_typer::SmartsAnalyzer sa;
-  atom_typer::SmartsAnalyzer::StandardSmartsLogOptions log_options;
-  atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions workflow_options;
-  workflow_options.include_x_in_reserialization = false;
-  workflow_options.enumerate_bond_order = false;
-  log_options.enabled = false;
-
-  int pass = 0, fail = 0, error = 0;
-
-  std::cout << "=== EQUIVALENCE TESTS (should produce same output) ===" << std::endl;
-  for (const auto &[desc, smarts_a, smarts_b] : test_cases) {
-    try {
-      auto result_a = sa.standard_smarts({smarts_a}, false, false, false,
-                                          workflow_options, log_options);
-      auto result_b = sa.standard_smarts({smarts_b}, false, false, false,
-                                          workflow_options, log_options);
-
-      const std::string out_a = result_a.empty() ? "(empty)" : result_a[0];
-      const std::string out_b = result_b.empty() ? "(empty)" : result_b[0];
-
-      if (out_a == out_b) {
-        std::cout << "  PASS: " << desc << std::endl;
-        std::cout << "    A: " << smarts_a << " -> " << out_a << std::endl;
-        std::cout << "    B: " << smarts_b << " -> " << out_b << std::endl;
-        ++pass;
-      } else {
-        std::cout << "  FAIL: " << desc << std::endl;
-        std::cout << "    A: " << smarts_a << " -> " << out_a << std::endl;
-        std::cout << "    B: " << smarts_b << " -> " << out_b << std::endl;
-        ++fail;
+  static std::vector<atom_typer::AtomType> extract_atom_types(
+    const std::vector<atom_typer::PatternItem> &pattern_items) {
+    std::vector<atom_typer::AtomType> atom_types;
+    atom_types.reserve(pattern_items.size());
+    for (const auto &item : pattern_items) {
+      if (item.kind == atom_typer::PatternItemKind::Atom) {
+        atom_types.push_back(item.atom);
       }
-    } catch (const std::exception &e) {
-      std::cout << "  ERROR: " << desc << " — " << e.what() << std::endl;
-      std::cout << "    A: " << smarts_a << std::endl;
-      std::cout << "    B: " << smarts_b << std::endl;
-      ++error;
+    }
+    return atom_types;
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Basic SMILES (ethanol)", "[AtomTyper]") {
+    std::string smiles = "CCO";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 3);
+    CHECK(atom_types[0].atomic_number == 6);
+    CHECK(atom_types[0].min_bonds == 1);
+    CHECK(atom_types[1].atomic_number == 6);
+    CHECK(atom_types[1].min_bonds == 2);
+    CHECK(atom_types[2].atomic_number == 8);
+    CHECK(atom_types[2].min_bonds == 1);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Aromatic benzene", "[AtomTyper]") {
+    std::string smiles = "c1ccccc1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.atomic_number == 6);
+      CHECK(at.is_aromatic);
+      CHECK(at.is_in_ring);
+      CHECK(at.ring_size == 6);
     }
   }
 
-  std::cout << "\n=== NEGATIVE TESTS (should produce different output) ===" << std::endl;
-  for (const auto &[desc, smarts_a, smarts_b] : negative_cases) {
-    try {
-      auto result_a = sa.standard_smarts({smarts_a}, false, false, false,
-                                          workflow_options, log_options);
-      auto result_b = sa.standard_smarts({smarts_b}, false, false, false,
-                                          workflow_options, log_options);
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Ring detection", "[AtomTyper]") {
+    std::string smiles = "C1CCCCC1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
-      const std::string out_a = result_a.empty() ? "(empty)" : result_a[0];
-      const std::string out_b = result_b.empty() ? "(empty)" : result_b[0];
-
-      if (out_a != out_b) {
-        std::cout << "  PASS: " << desc << std::endl;
-        std::cout << "    A: " << smarts_a << " -> " << out_a << std::endl;
-        std::cout << "    B: " << smarts_b << " -> " << out_b << std::endl;
-        ++pass;
-      } else {
-        std::cout << "  FAIL: " << desc << " (should differ but got same output)" << std::endl;
-        std::cout << "    A: " << smarts_a << " -> " << out_a << std::endl;
-        std::cout << "    B: " << smarts_b << " -> " << out_b << std::endl;
-        ++fail;
-      }
-    } catch (const std::exception &e) {
-      std::cout << "  ERROR: " << desc << " — " << e.what() << std::endl;
-      ++error;
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.is_in_ring);
+      CHECK(at.ring_size == 6);
+      CHECK_FALSE(at.is_aromatic);
     }
   }
 
-  std::cout << "\n=== OR-PRIMITIVE REWRITE FLAG TESTS ===" << std::endl;
-  try {
-    atom_typer::SmartsAnalyzer::StandardSmartsWorkflowOptions rw_opts =
-        workflow_options;
-    rw_opts.rewrite_or_primitives_to_negated = true;
-    rw_opts.or_primitive_rewrite_atomic_nums = {6};  // carbon-only
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Hybridization (SP2)", "[AtomTyper]") {
+    std::string smiles = "C=C";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
 
-    // With rewrite enabled for carbon, H1,H2,H3,H4 should normalize to !H0.
-    auto c_or = sa.standard_smarts({"[C;H1,H2,H3,H4]"}, false, false, false,
-                                   rw_opts, log_options);
-    auto c_not = sa.standard_smarts({"[C;!H0]"}, false, false, false,
-                                    rw_opts, log_options);
-    const std::string c_or_out = c_or.empty() ? "(empty)" : c_or[0];
-    const std::string c_not_out = c_not.empty() ? "(empty)" : c_not[0];
-    auto normalize_and_delim = [](std::string s) {
-      for (char &ch : s) {
-        if (ch == ';') ch = '&';
-      }
-      return s;
+    REQUIRE(atom_types.size() == 2);
+    for (const auto& at : atom_types) {
+      CHECK(at.hybridization == "SP2");
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Hybridization (SP)", "[AtomTyper]") {
+    std::string smiles = "C#C";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 2);
+    for (const auto& at : atom_types) {
+      CHECK(at.hybridization == "SP");
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Formal charge", "[AtomTyper]") {
+    std::string smiles = "[NH4+]";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].atomic_number == 7);
+    CHECK(atom_types[0].formal_charge == 1);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Basic SMARTS", "[AtomTyper]") {
+    std::string smarts = "[C,N]";
+    CHECK_NOTHROW(typer.type_atoms_from_smarts(smarts));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS explicit H defaults to 0", "[AtomTyper]") {
+    std::string smarts = "[C]";
+    auto atom_types = extract_atom_types(typer.type_pattern_from_smarts(smarts));
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].num_hydrogens == 0);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS #6 supports aromatic and aliphatic", "[AtomTyper]") {
+    std::string smarts = "[#6]";
+    auto atom_types = extract_atom_types(typer.type_pattern_from_smarts(smarts));
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].is_aromatic);
+    CHECK(atom_types[0].is_aliphatic);
+    CHECK(atom_types[0].smarts_pattern.find("A,a") != std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS explicit H count preserved", "[AtomTyper]") {
+    std::string smarts = "[CH3]";
+    auto atom_types = extract_atom_types(typer.type_pattern_from_smarts(smarts));
+
+    REQUIRE(atom_types.size() == 1);
+    CHECK(atom_types[0].num_hydrogens == 3);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: type_atoms_from_smarts emits expected flags",
+           "[AtomTyper]") {
+    const std::string smarts = "[CH2][CX3]=[O]";
+    const std::string enumerated = typer.type_atoms_from_smarts(smarts);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find("D") != std::string::npos);
+    CHECK(enumerated.find("H") != std::string::npos);
+    const bool has_charge_token =
+      enumerated.find("+") != std::string::npos ||
+      enumerated.find("-") != std::string::npos;
+    CHECK(has_charge_token);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+        "AtomTyper: type_atoms_from_smarts preserves branching",
+           "[AtomTyper]") {
+    const std::string smarts = "[#6:1](O)[$([c:3][#6:5]O)]";
+      const std::string enumerated = typer.type_atoms_from_smarts(smarts);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find("[") != std::string::npos);
+    CHECK(enumerated.find("]") != std::string::npos);
+    CHECK(enumerated.find("([") != std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+        "AtomTyper: type_atoms_from_smarts maps newly introduced atoms",
+           "[AtomTyper][enumerate_dof_map_new_atoms]") {
+    const std::string smarts = "[C:1]=[C:2]";
+      int max_amap = 2;
+      const std::string enumerated = typer.type_atoms_from_smarts(smarts, true, max_amap);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find(":1") != std::string::npos);
+    CHECK(enumerated.find(":2") != std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+        "AtomTyper: type_atoms_from_smarts handles complex bond OR variants",
+           "[AtomTyper][enumerate_dof_complex_bonds]") {
+    const std::vector<std::string> variants = {
+      "[#6:1]=[#6:2]",
+      "[#6:1]-[#6:2]",
+      "[#6:1]:[#6:2]",
     };
-    if (normalize_and_delim(c_or_out) == normalize_and_delim(c_not_out) &&
-        c_or_out.find("!H0") != std::string::npos) {
-      std::cout << "  PASS: Carbon rewrite enabled (H1,H2,H3,H4 -> !H0)" << std::endl;
-      std::cout << "    A: [C;H1,H2,H3,H4] -> " << c_or_out << std::endl;
-      std::cout << "    B: [C;!H0]         -> " << c_not_out << std::endl;
-      ++pass;
-    } else {
-      std::cout << "  FAIL: Carbon rewrite enabled (H1,H2,H3,H4 -> !H0)" << std::endl;
-      std::cout << "    A: [C;H1,H2,H3,H4] -> " << c_or_out << std::endl;
-      std::cout << "    B: [C;!H0]         -> " << c_not_out << std::endl;
-      ++fail;
-    }
 
-    // Control: rewrite disabled should preserve prior non-equivalence here.
-    auto c_or_base = sa.standard_smarts({"[C;H1,H2,H3,H4]"}, false, false,
-                                        false, workflow_options, log_options);
-    auto c_not_base = sa.standard_smarts({"[C;!H0]"}, false, false, false,
-                                         workflow_options, log_options);
-    const std::string c_or_base_out =
-        c_or_base.empty() ? "(empty)" : c_or_base[0];
-    const std::string c_not_base_out =
-        c_not_base.empty() ? "(empty)" : c_not_base[0];
-    if (c_or_base_out != c_not_base_out) {
-      std::cout << "  PASS: Carbon rewrite disabled (no forced conversion)" << std::endl;
-      ++pass;
-    } else {
-      std::cout << "  FAIL: Carbon rewrite disabled (unexpected conversion)" << std::endl;
-      std::cout << "    A: [C;H1,H2,H3,H4] -> " << c_or_base_out << std::endl;
-      std::cout << "    B: [C;!H0]         -> " << c_not_base_out << std::endl;
-      ++fail;
+    REQUIRE(variants.size() == 3);
+    for (const auto& v : variants) {
+      INFO("Variant: " << v);
+      const auto enumerated = typer.type_atoms_from_smarts(v);
+      CHECK_FALSE(enumerated.empty());
     }
-
-    // Per-atom scope: with carbon-only config, nitrogen should not be rewritten.
-    auto n_or = sa.standard_smarts({"[N;H1,H2,H3,H4]"}, false, false, false,
-                                   rw_opts, log_options);
-    auto n_not = sa.standard_smarts({"[N;!H0]"}, false, false, false,
-                                    rw_opts, log_options);
-    const std::string n_or_out = n_or.empty() ? "(empty)" : n_or[0];
-    const std::string n_not_out = n_not.empty() ? "(empty)" : n_not[0];
-    if (n_or_out != n_not_out) {
-      std::cout << "  PASS: Carbon-only rewrite scope respected" << std::endl;
-      ++pass;
-    } else {
-      std::cout << "  FAIL: Carbon-only rewrite scope violated" << std::endl;
-      std::cout << "    A: [N;H1,H2,H3,H4] -> " << n_or_out << std::endl;
-      std::cout << "    B: [N;!H0]         -> " << n_not_out << std::endl;
-      ++fail;
-    }
-
-  } catch (const std::exception &e) {
-    std::cout << "  ERROR: OR-primitive rewrite tests — " << e.what() << std::endl;
-    ++error;
   }
 
-  std::cout << "\n=== REMOVE_AA_WILDCARD DEFAULT TESTS ===" << std::endl;
-  try {
-    // Default behavior (now ON): OR(A,a) tautology should be removed.
-    auto aa_default = sa.standard_smarts({"[C;A,a]"}, false, false, false,
-                                         workflow_options, log_options);
-    auto c_default = sa.standard_smarts({"[C]"}, false, false, false,
-                                        workflow_options, log_options);
-    const std::string aa_default_out =
-        aa_default.empty() ? "(empty)" : aa_default[0];
-    const std::string c_default_out = c_default.empty() ? "(empty)" : c_default[0];
-    if (aa_default_out == c_default_out) {
-      std::cout << "  PASS: remove_aa_wildcard enabled by default" << std::endl;
-      std::cout << "    A: [C;A,a] -> " << aa_default_out << std::endl;
-      std::cout << "    B: [C]     -> " << c_default_out << std::endl;
-      ++pass;
-    } else {
-      std::cout << "  FAIL: remove_aa_wildcard default behavior" << std::endl;
-      std::cout << "    A: [C;A,a] -> " << aa_default_out << std::endl;
-      std::cout << "    B: [C]     -> " << c_default_out << std::endl;
-      ++fail;
-    }
-
-    // Explicit opt-out inspection: on some inputs RDKit canonicalization may
-    // already collapse to the same form, so this check reports observed
-    // behavior without being flaky.
-    auto aa_off_opts = workflow_options;
-    aa_off_opts.remove_aa_wildcard = false;
-    auto aa_off = sa.standard_smarts({"[C;A,a]"}, false, false, false,
-                                     aa_off_opts, log_options);
-    auto c_off = sa.standard_smarts({"[C]"}, false, false, false,
-                                    aa_off_opts, log_options);
-    const std::string aa_off_out = aa_off.empty() ? "(empty)" : aa_off[0];
-    const std::string c_off_out = c_off.empty() ? "(empty)" : c_off[0];
-    if (aa_off_out != c_off_out) {
-      std::cout << "  PASS: remove_aa_wildcard opt-out shows distinct output" << std::endl;
-      std::cout << "    A: [C;A,a] -> " << aa_off_out << std::endl;
-      std::cout << "    B: [C]     -> " << c_off_out << std::endl;
-    } else {
-      std::cout << "  PASS: remove_aa_wildcard opt-out set (no visible change for this input)" << std::endl;
-      std::cout << "    A: [C;A,a] -> " << aa_off_out << std::endl;
-      std::cout << "    B: [C]     -> " << c_off_out << std::endl;
-    }
-    ++pass;
-  } catch (const std::exception &e) {
-    std::cout << "  ERROR: remove_aa_wildcard default tests — " << e.what()
-              << std::endl;
-    ++error;
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: aromatic constrained atom is not collapsed",
+           "[AtomTyper]") {
+    const std::string smarts = "[#6:1]:[c&H2&+0]";
+    CHECK_THROWS_WITH(
+      typer.type_atoms_from_smarts(smarts),
+      Catch::Matchers::ContainsSubstring(
+        "No valid DoF atom alternatives could be generated") &&
+        Catch::Matchers::ContainsSubstring("source_smarts='"));
   }
 
-  std::cout << "\n=== HALOGEN/RECURSIVE SULFUR REGRESSION TEST ===" << std::endl;
-  try {
-    const std::string failing_input = "[Cl,$([O]-[S]),Br,I;H1;+0:1]";
-    const std::string expected_output =
-        "[$([O&H1&+0]-S),H1&+0&$([Cl,Br,I]):1]";
-    auto out = sa.standard_smarts({failing_input}, false, false, false,
-                                  workflow_options, log_options);
-    const std::string got = out.empty() ? "(empty)" : out[0];
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: reorder_query_tree_by_embedding orders AtomAnd",
+           "[AtomTyper]") {
+    const std::string smarts = "[#6&H1&+0]";
+    const std::map<std::string, double> embedding = {
+      {"#6", 10.0}, {"H1", 1.0}, {"+0", 5.0}};
 
-    if (got == expected_output) {
-      std::cout << "  PASS: Halogen/recursive sulfur canonical output" << std::endl;
-      std::cout << "    input:  " << failing_input << std::endl;
-      std::cout << "    output: " << got << std::endl;
-      ++pass;
-    } else {
-      std::cout << "  FAIL: Halogen/recursive sulfur canonical output" << std::endl;
-      std::cout << "    input:  " << failing_input << std::endl;
-      std::cout << "    expected: " << expected_output << std::endl;
-      std::cout << "    output: " << got << std::endl;
-      ++fail;
-    }
-  } catch (const std::exception &e) {
-    std::cout << "  ERROR: halogen/recursive sulfur regression test — "
-              << e.what() << std::endl;
-    ++error;
+    const std::string reordered =
+      typer.reorder_query_tree_by_embedding(smarts, embedding);
+    CHECK_FALSE(reordered.empty());
+    CHECK(reordered.find("H1") != std::string::npos);
+    CHECK(reordered.find("+0") != std::string::npos);
+    CHECK(reordered.find("#6") != std::string::npos);
   }
 
-  std::cout << "\n=== SUMMARY ===" << std::endl;
-  std::cout << "  Total: " << (pass + fail + error) << std::endl;
-  std::cout << "  Pass:  " << pass << std::endl;
-  std::cout << "  Fail:  " << fail << std::endl;
-  std::cout << "  Error: " << error << std::endl;
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: reorder_query_tree_by_embedding orders AtomOr",
+           "[AtomTyper]") {
+    const std::string smarts = "[#6,#7,#8]";
+    const std::map<std::string, double> embedding = {
+      {"#6", 10.0}, {"#7", 1.0}, {"#8", 5.0}};
 
-  return (fail + error) > 0 ? 1 : 0;
-}
+    const std::string reordered =
+      typer.reorder_query_tree_by_embedding(smarts, embedding);
+    CHECK_FALSE(reordered.empty());
+    CHECK(reordered.find("#6") != std::string::npos);
+    CHECK(reordered.find("#7") != std::string::npos);
+    CHECK(reordered.find("#8") != std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: default embedding is usable",
+           "[AtomTyper]") {
+    const auto embedding = typer.get_default_query_embedding();
+    CHECK_FALSE(embedding.empty());
+    CHECK(embedding.count("#6") > 0);
+    CHECK(embedding.count("!H0") > 0);
+
+    const std::string reordered =
+      typer.reorder_query_tree_by_embedding("[#6&H1&+0]", embedding);
+    CHECK_FALSE(reordered.empty());
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: is_valid_valence_smarts for fully typed patterns",
+           "[AtomTyper]") {
+    const std::string valid =
+      "[#6&D4&H3&+0&A:1]-[#6&D4&H3&+0&A:2]";
+    const std::string invalid = "[#6&D5&H0&+0&A]";
+
+    CHECK(typer.is_valid_valence_smarts(valid));
+    CHECK_FALSE(typer.is_valid_valence_smarts(invalid));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: is_valid_valence_smarts rejects aromatic bond between aliphatic-only atoms",
+           "[AtomTyper]") {
+    const std::string invalid = "[#6&D0&H3&+&A:1]:[#6&D0&H3&+&A:2]";
+    CHECK_FALSE(typer.is_valid_valence_smarts(invalid));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: is_valid_valence_smarts rejects aliphatic bond between aromatic-only atoms",
+           "[AtomTyper]") {
+    const std::string invalid = "[#6&D3&H0&+0&a:1]-[#6&D3&H0&+0&a:2]";
+    CHECK_FALSE(typer.is_valid_valence_smarts(invalid));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: is_valid_valence_smarts handles negated primitives",
+           "[AtomTyper]") {
+    CHECK(typer.is_valid_valence_smarts("[#6;!H1]"));
+    CHECK_FALSE(typer.is_valid_valence_smarts("[#6;H1;!H1]"));
+    CHECK_FALSE(typer.is_valid_valence_smarts("[#6;+1;!+1]"));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: inspect_tautomer recognizes nitro-like motif",
+           "[AtomTyper]") {
+    CHECK(typer.inspect_tautomer("[#7](=[#8])=[#8]"));
+    CHECK_FALSE(typer.inspect_tautomer("[#6]-[#6]"));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: is_valid_valence_smarts allows tautomer override",
+           "[AtomTyper]") {
+    const std::string tautomeric = "[#7](=[#8])=[#8]";
+    CHECK(typer.is_valid_valence_smarts(tautomeric));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: filter_invalid_valence_smarts discards invalid",
+           "[AtomTyper]") {
+    const std::vector<std::string> input = {
+      "[#6&D4&H3&+0&A:1]-[#6&D4&H3&+0&A:2]",
+      "[#6&D0&H3&+&A:1]:[#6&D0&H3&+&A:2]",
+      "[#6;H1;!H1]",
+      "[#6&D5&H0&+0&A]"};
+
+    const auto filtered = typer.filter_invalid_valence_smarts(input);
+    REQUIRE(filtered.size() == 1);
+    CHECK(filtered[0] == input[0]);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture,
+           "AtomTyper: type_atoms_from_smarts preserves negated atomic-number atoms",
+           "[AtomTyper]") {
+    const std::string smarts = "[!#6:1]=[!#6:2]";
+    const std::string enumerated = typer.type_atoms_from_smarts(smarts);
+
+    CHECK_FALSE(enumerated.empty());
+    CHECK(enumerated.find("!#6") != std::string::npos);
+    CHECK(enumerated.find("#0") == std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS bond counts and hybridization", "[AtomTyper]") {
+    std::string smarts = "[C]=[C]";
+    auto atom_types = extract_atom_types(typer.type_pattern_from_smarts(smarts));
+
+    REQUIRE(atom_types.size() == 2);
+    for (const auto& at : atom_types) {
+      CHECK(at.num_single_bonds == 0);
+      CHECK(at.num_double_bonds == 1);
+      CHECK(at.num_triple_bonds == 0);
+      CHECK(at.num_aromatic_bonds == 0);
+      CHECK(at.hybridization == "SP2");
+    }
+
+    const auto pattern_items = typer.type_pattern_from_smarts(smarts);
+    const auto typed_pattern = typer.get_pattern_types_string(pattern_items);
+    CHECK(typed_pattern.find("SingleBonds=0") != std::string::npos);
+    CHECK(typed_pattern.find("DoubleBonds=1") != std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: remaining valence uses RDKit valence API", "[AtomTyper]") {
+    std::string smiles = "CCO";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 3);
+    CHECK(atom_types[0].remaining_valence == 3);
+    CHECK(atom_types[1].remaining_valence == 2);
+    CHECK(atom_types[2].remaining_valence == 1);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Invalid SMILES throws", "[AtomTyper]") {
+    std::string invalid_smiles = "C(C";
+    CHECK_THROWS_AS(typer.type_atoms_from_smiles(invalid_smiles), std::runtime_error);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Empty SMILES throws", "[AtomTyper]") {
+    std::string empty_smiles = "";
+    CHECK_THROWS_AS(typer.type_atoms_from_smiles(empty_smiles), std::runtime_error);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: Neighbor detection", "[AtomTyper]") {
+    std::string smiles = "CCC";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 3);
+    CHECK(atom_types[0].neighbors.size() == 1);
+    CHECK(atom_types[1].neighbors.size() == 2);
+    CHECK(atom_types[2].neighbors.size() == 1);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: SMARTS pattern generation", "[AtomTyper]") {
+    std::string smiles = "CCO";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 3);
+    for (const auto& at : atom_types) {
+      CHECK_FALSE(at.smarts_pattern.empty());
+      CHECK(at.smarts_pattern.front() == '[');
+      CHECK(at.smarts_pattern.back() == ']');
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: get_atom_types_string", "[AtomTyper]") {
+    std::string smiles = "CC";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+    std::string output = typer.get_atom_types_string(atom_types);
+
+    CHECK_FALSE(output.empty());
+    CHECK(output.find("Atom Types") != std::string::npos);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: canonical setting", "[AtomTyper]") {
+    typer.set_use_canonical(true);
+    std::string smiles = "CCO";
+    CHECK_NOTHROW(typer.type_atoms_from_smiles(smiles));
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: ring membership list", "[AtomTyper]") {
+    std::string smiles = "C1CCCCC1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.ring_membership_list.size() == 6);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of ring bonds", "[AtomTyper]") {
+    std::string smiles = "C1CCCCC1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.num_ring_bonds == 2);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aliphatic rings (cyclohexane)", "[AtomTyper]") {
+    std::string smiles = "C1CCCCC1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.num_aliphatic_rings == 1);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aliphatic rings (benzene)", "[AtomTyper]") {
+    std::string smiles = "c1ccccc1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.num_aliphatic_rings == 0);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aromatic rings (benzene)", "[AtomTyper]") {
+    std::string smiles = "c1ccccc1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.num_aromatic_rings == 1);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: number of aromatic rings (cyclohexane)", "[AtomTyper]") {
+    std::string smiles = "C1CCCCC1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.num_aromatic_rings == 0);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: ring connectivity", "[AtomTyper]") {
+    std::string smiles = "C1CCCCC1";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 6);
+    for (const auto& at : atom_types) {
+      CHECK(at.ring_connectivity == 2);
+    }
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: bond types map", "[AtomTyper]") {
+    std::string smiles = "CC=O";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 3);
+    const auto& carbonyl_carbon = atom_types[1];
+    CHECK(carbonyl_carbon.bond_types.at(1) == 1);
+    CHECK(carbonyl_carbon.bond_types.at(2) == 1);
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: chirality", "[AtomTyper]") {
+    std::string smiles = "CC[C@H](O)C";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+
+    REQUIRE(atom_types.size() == 5);
+    const auto& chiral_carbon = atom_types[2];
+    CHECK(chiral_carbon.chirality == "R");
+  }
+
+  TEST_CASE_METHOD(AtomTyperFixture, "AtomTyper: atom type string content", "[AtomTyper]") {
+    std::string smiles = "CCO";
+    auto atom_types = extract_atom_types(typer.type_atoms_from_smiles(smiles));
+    std::string output = typer.get_atom_types_string(atom_types);
+
+    CHECK(output.find("Atom 0: Element=6") != std::string::npos);
+    CHECK(output.find("Atom 1: Element=6") != std::string::npos);
+    CHECK(output.find("Atom 2: Element=8") != std::string::npos);
+  }

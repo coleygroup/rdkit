@@ -9,39 +9,9 @@
 namespace RDKit {
     class Atom;
     class ROMol;
-    class RWMol;
 }
 
 namespace atom_typer {
-
-/**
- * Detail levels for SMARTS pattern generation
- */
-enum Level { 
-    MINIMAL,   // Basic element types only
-    STANDARD,  // Elements + bond types + aromaticity
-    DETAILED,  // Add hydrogen counts, formal charges
-    COMPLETE   // All features: valence, connectivity, ring membership
-};
-
-/**
- * Convert a SMILES string to a SMARTS pattern
- * 
- * @param smiles Input SMILES string representing a molecule
- * @param level Detail level for the generated SMARTS pattern
- * @return SMARTS string with query features based on the specified level
- */
-RDKIT_ATOMTYPER_EXPORT std::string smiles_to_smarts(const std::string& smiles, Level level);
-
-/**
- * Batch convert SMILES strings to SMARTS patterns using a predefined detail level.
- *
- * @param smilesList Input SMILES strings
- * @param level Detail level for generated SMARTS patterns
- * @return SMARTS strings in the same order as smilesList
- */
-RDKIT_ATOMTYPER_EXPORT std::vector<std::string> smiles_to_smarts(
-    const std::vector<std::string>& smilesList, Level level);
 
 /**
  * Convert a SMILES string to a SMARTS pattern using a custom primitive list.
@@ -164,18 +134,6 @@ RDKIT_ATOMTYPER_EXPORT std::string build_atom_primitive_token(
     const RDKit::Atom* atom, const RDKit::ROMol* mol,
     const std::vector<std::string>& primitiveList,
     bool includeAtomMap = false);
-
-/**
- * Convert a query molecule to a SMARTS string
- * 
- * @param mol Original molecule (for accessing atom properties)
- * @param queryMol Query molecule built with appropriate query features
- * @param level Detail level for formatting the SMARTS string
- * @return Formatted SMARTS string
- */
-RDKIT_ATOMTYPER_EXPORT std::string queryMoleculeToSmarts(const RDKit::ROMol* mol, 
-                                   const RDKit::RWMol* queryMol,
-                                   Level level);
 
 } // namespace atom_typer
 
