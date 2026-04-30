@@ -159,6 +159,37 @@ std::string bracketUnbracketedWildcardAtoms(const std::string &smarts) {
     return out;
 }
 
+void restoreLexicalChiralityFromSmarts(const std::string &smiles,
+                                       RDKit::ROMol &mol) {
+    if (smiles.find('@') == std::string::npos) {
+        return;
+    }
+
+    std::unique_ptr<RDKit::ROMol> smartsMol(RDKit::SmartsToMol(smiles));
+    if (!smartsMol || smartsMol->getNumAtoms() != mol.getNumAtoms() ||
+        smartsMol->getNumBonds() != mol.getNumBonds()) {
+        return;
+    }
+
+    for (unsigned int atomIdx = 0; atomIdx < mol.getNumAtoms(); ++atomIdx) {
+        const auto *smartsAtom = smartsMol->getAtomWithIdx(atomIdx);
+        auto *smilesAtom = mol.getAtomWithIdx(atomIdx);
+        if (smilesAtom->getChiralTag() == RDKit::Atom::CHI_UNSPECIFIED &&
+            smartsAtom->getChiralTag() != RDKit::Atom::CHI_UNSPECIFIED) {
+            smilesAtom->setChiralTag(smartsAtom->getChiralTag());
+        }
+    }
+}
+
+std::unique_ptr<RDKit::ROMol> smilesToMolPreservingLexicalChirality(
+    const std::string &smiles) {
+    std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles));
+    if (mol) {
+        restoreLexicalChiralityFromSmarts(smiles, *mol);
+    }
+    return mol;
+}
+
 std::string buildWildcardNeighborSmarts(
     const RDKit::ROMol &mol, unsigned int centerIdx,
     const RDKit::PATH_TYPE &environmentBonds,
@@ -240,9 +271,43 @@ size_t rootedAtomTokenEnd(const std::string &smarts) {
     return std::string::npos;
 }
 
+std::string atomChiralityMarker(const RDKit::Atom *atom) {
+    if (!atom) {
+        return "";
+    }
+    switch (atom->getChiralTag()) {
+        case RDKit::Atom::CHI_TETRAHEDRAL_CW:
+            return "@@";
+        case RDKit::Atom::CHI_TETRAHEDRAL_CCW:
+            return "@";
+        default:
+            return "";
+    }
+}
+
+std::string injectChiralityIntoAtomToken(const std::string &token,
+                                         const RDKit::Atom *atom) {
+    const std::string marker = atomChiralityMarker(atom);
+    if (marker.empty() || token.size() < 2 || token.front() != '[' ||
+        token.back() != ']' || token.find('@') != std::string::npos) {
+        return token;
+    }
+
+    size_t insertPos = 1;
+    if (token[insertPos] == '#') {
+        ++insertPos;
+        while (insertPos < token.size() &&
+               std::isdigit(static_cast<unsigned char>(token[insertPos]))) {
+            ++insertPos;
+        }
+    }
+
+    return token.substr(0, insertPos) + marker + token.substr(insertPos);
+}
+
 std::string buildAtomTokenFromPrimitiveValues(
-    const std::vector<std::string> &primitiveValues,
-    std::uint64_t subsetMask) {
+    const std::vector<std::string> &primitiveValues, std::uint64_t subsetMask,
+    const RDKit::Atom *atom = nullptr) {
     std::stringstream ss;
     ss << "[";
     bool first = true;
@@ -257,7 +322,7 @@ std::string buildAtomTokenFromPrimitiveValues(
         first = false;
     }
     ss << "]";
-    return ss.str();
+    return injectChiralityIntoAtomToken(ss.str(), atom);
 }
 
 std::unique_ptr<RDKit::ROMol> reorderSubmolBondsDeterministically(
@@ -329,6 +394,7 @@ std::unique_ptr<RDKit::ROMol> reorderSubmolBondsDeterministically(
         if (atom->hasQuery()) {
             queryAtom->setQuery(atom->getQuery()->copy());
         }
+        queryAtom->setChiralTag(atom->getChiralTag());
         queryAtom->setFormalCharge(atom->getFormalCharge());
         queryAtom->setIsAromatic(atom->getIsAromatic());
         ordered->addAtom(queryAtom, false, true);
@@ -462,7 +528,8 @@ std::string smilesToSmartsFromNormalizedPrimitives(
         throw std::invalid_argument("Primitive list is empty");
     }
 
-    std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles));
+    std::unique_ptr<RDKit::ROMol> mol(
+        smilesToMolPreservingLexicalChirality(smiles));
     if (!mol) {
         throw std::invalid_argument("Invalid SMILES string");
     }
@@ -510,7 +577,8 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
         throw std::invalid_argument("Primitive list is empty");
     }
 
-    std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles));
+    std::unique_ptr<RDKit::ROMol> mol(
+        smilesToMolPreservingLexicalChirality(smiles));
     if (!mol) {
         throw std::invalid_argument("Invalid SMILES string");
     }
@@ -564,6 +632,7 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
             if (parsedCenter->hasQuery()) {
                 queryAtom->setQuery(parsedCenter->getQuery()->copy());
             }
+            queryAtom->setChiralTag(centerAtom->getChiralTag());
             single->addAtom(queryAtom, false, true);
             envSubmol.reset(single);
             atomIdxMap[static_cast<int>(centerIdx)] = 0;
@@ -591,18 +660,19 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
             if (parsedAtom->hasQuery()) {
                 queryAtom->setQuery(parsedAtom->getQuery()->copy());
             }
+            queryAtom->setChiralTag(parentAtom->getChiralTag());
         }
 
         auto centerIt = atomIdxMap.find(static_cast<int>(centerIdx));
         if (centerIt == atomIdxMap.end()) {
             throw std::runtime_error("Center atom not present in atom environment");
         }
+        const auto centerAtom =
+            mol->getAtomWithIdx(static_cast<unsigned int>(centerIdx));
 
         std::vector<std::string> centerPrimitiveValues;
         if (includePrimitiveSubsets) {
             centerPrimitiveValues.reserve(tokens.size());
-            const auto centerAtom =
-                mol->getAtomWithIdx(static_cast<unsigned int>(centerIdx));
             for (const auto &token : tokens) {
                 centerPrimitiveValues.push_back(
                     primitiveValue(centerAtom, mol.get(), token));
@@ -615,11 +685,10 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
 
         std::string smartsOut;
         if (wildcardNeighbors) {
-            const auto centerAtom = mol->getAtomWithIdx(
-                static_cast<unsigned int>(centerIdx));
-            const std::string rootToken =
+            const std::string rootToken = injectChiralityIntoAtomToken(
                 buildAtomPrimitiveTokenFromTokens(centerAtom, mol.get(), tokens,
-                                                  false);
+                                                  false),
+                centerAtom);
             smartsOut = buildWildcardNeighborSmarts(
                 *mol, static_cast<unsigned int>(centerIdx), environmentBonds,
                 rootToken);
@@ -655,11 +724,11 @@ std::vector<std::string> smilesToAtomCenteredSmartsFromNormalizedPrimitives(
         // Emit full primitive token first for backwards-friendly ordering,
         // then all remaining non-empty subsets.
         appendOut(buildAtomTokenFromPrimitiveValues(centerPrimitiveValues,
-                                                    fullMask) +
+                                                    fullMask, centerAtom) +
                   suffix);
         for (std::uint64_t mask = fullMask - 1; mask > 0; --mask) {
             appendOut(buildAtomTokenFromPrimitiveValues(centerPrimitiveValues,
-                                                        mask) +
+                                                        mask, centerAtom) +
                       suffix);
         }
     }

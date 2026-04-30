@@ -227,6 +227,32 @@
     CHECK(smarts[1].empty());
   }
 
+  TEST_CASE("ExpressionBuilder: atom-centered wildcard neighbors preserve chirality", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_atom_centered_smarts(
+      "CC[C@H](O)C",
+      {"atom", "A", "D", "H", "charge", "v", "R", "r", "X", "x", "^"},
+      1, true, false, false);
+
+    REQUIRE(smarts.size() == 5);
+    CHECK(smarts[2].find("[#6@") != std::string::npos);
+
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts[2]));
+    REQUIRE(query != nullptr);
+  }
+
+  TEST_CASE("ExpressionBuilder: atom-centered preserves lexical chirality from minimal smiles", "[ExpressionBuilder]") {
+    const auto smarts = atom_typer::smiles_to_atom_centered_smarts(
+      "[C@H][C]",
+      {"atom", "A", "D", "H", "charge", "v", "R", "r", "X", "x", "^"},
+      1, true, false, false);
+
+    REQUIRE(smarts.size() == 2);
+    CHECK(smarts[0].find("[#6@") != std::string::npos);
+
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol(smarts[0]));
+    REQUIRE(query != nullptr);
+  }
+
   TEST_CASE("ReactionExtractor: reaction smiles extraction", "[ReactionExtractor]") {
     const std::string rxn = "[CH3:1][Br:2].[OH:3]>>[CH3:1][OH:3].[Br-:2]";
     const auto results = atom_typer::extract_single_root_template(
